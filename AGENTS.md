@@ -1,6 +1,8 @@
 # AGENTS.md
 
-Private repo (Forgejo `Tyler/ontos`). No GitHub mirror.
+Public repo: Forgejo `Tyler/ontos`, mirrored to GitHub at
+https://github.com/im-tyler/ontos. Every commit is publicly visible — treat
+all work as public-facing.
 
 ## Rules
 
