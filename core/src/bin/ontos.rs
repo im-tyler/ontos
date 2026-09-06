@@ -9,6 +9,7 @@ fn main() {
     let mut seed: u64 = 42;
     let mut out: Option<PathBuf> = None;
     let mut demote: Vec<(u32, u32)> = Vec::new();
+    let mut promote: Vec<(u32, u32)> = Vec::new();
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -31,8 +32,16 @@ fn main() {
                 demote.push((rx, ry));
                 i += 3;
             }
+            "--promote" => {
+                let rx: u32 = args[i + 1].parse().expect("invalid region x");
+                let ry: u32 = args[i + 2].parse().expect("invalid region y");
+                promote.push((rx, ry));
+                i += 3;
+            }
             _ => {
-                eprintln!("usage: ontos [--ticks N] [--seed S] [--out FILE] [--demote RX RY]...");
+                eprintln!(
+                    "usage: ontos [--ticks N] [--seed S] [--out FILE] [--demote RX RY] [--promote RX RY]..."
+                );
                 std::process::exit(1);
             }
         }
@@ -48,6 +57,13 @@ fn main() {
         world.set_level(rx, ry, Level::Coarse);
         if let Some(w) = writer.as_mut() {
             w.write(&Record::RegionLevel { region_x: rx, region_y: ry, level: 0 })
+                .expect("stream write failed");
+        }
+    }
+    for &(rx, ry) in &promote {
+        world.set_level(rx, ry, Level::Fine);
+        if let Some(w) = writer.as_mut() {
+            w.write(&Record::RegionLevel { region_x: rx, region_y: ry, level: 1 })
                 .expect("stream write failed");
         }
     }
