@@ -1,11 +1,20 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 pub const REGION_FINE: u32 = 64;
 pub const REGIONS_PER_AXIS: u32 = 2;
 pub const COARSE_FACTOR: u32 = 2;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+pub const FNV_PRIME: u64 = 0x100000001b3;
+
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET_BASIS;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Level {
     Coarse,
     Fine,
@@ -128,11 +137,11 @@ impl World {
     }
 
     fn expansion_pick(gx: u32, gy: u32, seed: u64) -> u32 {
-        let mut h = DefaultHasher::new();
-        seed.hash(&mut h);
-        gx.hash(&mut h);
-        gy.hash(&mut h);
-        (h.finish() % 4) as u32
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&seed.to_le_bytes());
+        bytes[8..12].copy_from_slice(&gx.to_le_bytes());
+        bytes[12..].copy_from_slice(&gy.to_le_bytes());
+        (fnv1a64(&bytes) % 4) as u32
     }
 
     pub fn read(&self, fx: u32, fy: u32) -> u8 {
@@ -210,14 +219,30 @@ impl World {
         self.regions.iter().map(|r| r.population()).sum()
     }
 
+    pub fn region(&self, rx: u32, ry: u32) -> &Region {
+        &self.regions[Self::region_index(rx, ry)]
+    }
+
+    pub fn region_hash(&self, rx: u32, ry: u32) -> u64 {
+        let region = &self.regions[Self::region_index(rx, ry)];
+        let mut bytes = Vec::with_capacity(1 + region.cells.len());
+        bytes.push(match region.level {
+            Level::Coarse => 0,
+            Level::Fine => 1,
+        });
+        bytes.extend_from_slice(&region.cells);
+        fnv1a64(&bytes)
+    }
+
     pub fn hash_state(&self) -> u64 {
-        let mut h = DefaultHasher::new();
-        self.tick.hash(&mut h);
-        for region in &self.regions {
-            region.level.hash(&mut h);
-            h.write(&region.cells);
+        let mut bytes = Vec::with_capacity(8 + 8 * self.regions.len());
+        bytes.extend_from_slice(&self.tick.to_le_bytes());
+        for ry in 0..REGIONS_PER_AXIS {
+            for rx in 0..REGIONS_PER_AXIS {
+                bytes.extend_from_slice(&self.region_hash(rx, ry).to_le_bytes());
+            }
         }
-        h.finish()
+        fnv1a64(&bytes)
     }
 
     pub fn step(&mut self) {
@@ -315,6 +340,12 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fnv_known_values() {
+        assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63dc4c8601ec8c);
+    }
 
     #[test]
     fn deterministic_replay() {

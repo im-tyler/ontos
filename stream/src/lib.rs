@@ -9,6 +9,7 @@ pub enum Record {
     Snapshot { population: u64 },
     CellFlipped { tick: u64, x: u32, y: u32 },
     RegionLevel { region_x: u32, region_y: u32, level: u8 },
+    RegionState { tick: u64, region_x: u32, region_y: u32, level: u8, population: u64, hash: u64 },
 }
 
 pub struct StreamWriter<W: Write> {
@@ -50,6 +51,22 @@ impl<W: Write> StreamWriter<W> {
                 self.out.write_all(&region_x.to_le_bytes())?;
                 self.out.write_all(&region_y.to_le_bytes())?;
                 self.out.write_all(&[*level])
+            }
+            Record::RegionState {
+                tick,
+                region_x,
+                region_y,
+                level,
+                population,
+                hash,
+            } => {
+                self.out.write_all(&[5u8])?;
+                self.out.write_all(&tick.to_le_bytes())?;
+                self.out.write_all(&region_x.to_le_bytes())?;
+                self.out.write_all(&region_y.to_le_bytes())?;
+                self.out.write_all(&[*level])?;
+                self.out.write_all(&population.to_le_bytes())?;
+                self.out.write_all(&hash.to_le_bytes())
             }
         }
     }

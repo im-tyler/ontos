@@ -59,6 +59,23 @@ fn main() {
                 .expect("stream write failed");
             w.write(&Record::Snapshot { population: world.population() })
                 .expect("stream write failed");
+            for ry in 0..ontos_core::REGIONS_PER_AXIS {
+                for rx in 0..ontos_core::REGIONS_PER_AXIS {
+                    let region = world.region(rx, ry);
+                    w.write(&Record::RegionState {
+                        tick: world.tick,
+                        region_x: rx,
+                        region_y: ry,
+                        level: match region.level {
+                            ontos_core::Level::Coarse => 0u8,
+                            ontos_core::Level::Fine => 1u8,
+                        },
+                        population: region.population(),
+                        hash: world.region_hash(rx, ry),
+                    })
+                    .expect("stream write failed");
+                }
+            }
         }
     }
     if let Some(mut w) = writer {
