@@ -163,3 +163,8 @@ fn golden_gravity_refit() {
 fn golden_gravity_multi() {
     verify_golden_gravity("g_multi.stream", 3);
 }
+
+#[test]
+fn golden_gravity_observer() {
+    verify_golden_gravity("g_observer.stream", 5);
+}

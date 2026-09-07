@@ -19,6 +19,7 @@ fn main() {
     let mut mode = Mode::Life;
     let mut bodies: u32 = 8;
     let mut events: Vec<(u64, u8, bool)> = Vec::new();
+    let mut observer_offset: Option<u64> = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -73,11 +74,15 @@ fn main() {
                 events.push((t, (ry * 2 + rx) as u8, false));
                 i += 4;
             }
+            "--observer" => {
+                observer_offset = Some(args[i + 1].parse().expect("invalid observer offset"));
+                i += 2;
+            }
             _ => {
                 eprintln!(
                     "usage: ontos [--mode life|gravity] [--ticks N] [--seed S] [--bodies N] [--out FILE]\n\
                      life:    [--demote RX RY] [--promote RX RY]...\n\
-                     gravity: [--demote-at T RX RY] [--promote-at T RX RY]..."
+                     gravity: [--demote-at T RX RY] [--promote-at T RX RY] [--observer OFFSET]..."
                 );
                 std::process::exit(1);
             }
@@ -86,7 +91,7 @@ fn main() {
 
     match mode {
         Mode::Life => run_life(ticks, seed, out, demote, promote),
-        Mode::Gravity => run_gravity(ticks, seed, out, bodies, events),
+        Mode::Gravity => run_gravity(ticks, seed, out, bodies, events, observer_offset),
     }
 }
 
@@ -176,12 +181,16 @@ fn run_gravity(
     out: Option<PathBuf>,
     bodies: u32,
     mut events: Vec<(u64, u8, bool)>,
+    observer_offset: Option<u64>,
 ) {
     events.sort();
     events.dedup();
     let mut world = GravityWorld::new(seed, bodies);
     for &(t, region, to_coarse) in &events {
         world.schedule(t, region, to_coarse);
+    }
+    if let Some(offset) = observer_offset {
+        world.set_observer(offset);
     }
     let mut writer = out.map(|path| {
         StreamWriter::new_gravity(
@@ -210,6 +219,20 @@ fn run_gravity(
         }
         world.step();
         if let Some(w) = writer.as_mut() {
+            if let Some(observer) = world.observer.as_ref() {
+                for &(region, to_coarse) in &observer.policy_events {
+                    let (rx, ry) = ((region % 2) as u32, (region / 2) as u32);
+                    w.write(&Record::RegionLevel {
+                        region_x: rx,
+                        region_y: ry,
+                        level: if to_coarse { 0 } else { 1 },
+                    })
+                    .expect("stream write failed");
+                }
+            }
+            if let Some(observer) = world.observer.as_mut() {
+                observer.policy_events.clear();
+            }
             w.write(&Record::TickHeader { tick: world.tick })
                 .expect("stream write failed");
             w.write(&Record::Snapshot {

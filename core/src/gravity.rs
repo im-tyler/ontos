@@ -58,6 +58,58 @@ pub struct Fit {
     pub t0: u64,
 }
 
+pub struct Observer {
+    rng: SplitMix64,
+    points: Vec<(f64, f64)>,
+    pub policy_events: Vec<(u8, bool)>,
+}
+
+impl Observer {
+    pub fn new(seed: u64, offset: u64) -> Self {
+        let mut rng = SplitMix64::new(seed ^ offset);
+        let mut points = Vec::new();
+        for _ in 0..2 {
+            let u0 = rng.draw();
+            let u1 = rng.draw();
+            points.push((
+                16.0 + (u0 as f64) * 2.0f64.powi(-64) * 96.0,
+                16.0 + (u1 as f64) * 2.0f64.powi(-64) * 96.0,
+            ));
+        }
+        Observer {
+            rng,
+            points,
+            policy_events: Vec::new(),
+        }
+    }
+
+    fn focus(&mut self, t: u64) -> (f64, f64) {
+        let k = ((t - 1) / 64) as usize;
+        while self.points.len() < k + 2 {
+            let u0 = self.rng.draw();
+            let u1 = self.rng.draw();
+            self.points.push((
+                16.0 + (u0 as f64) * 2.0f64.powi(-64) * 96.0,
+                16.0 + (u1 as f64) * 2.0f64.powi(-64) * 96.0,
+            ));
+        }
+        let p0 = self.points[k];
+        let p1 = self.points[k + 1];
+        let f = ((t - (1 + 64 * k as u64)) as f64) / 64.0;
+        (p0.0 + (p1.0 - p0.0) * f, p0.1 + (p1.1 - p0.1) * f)
+    }
+}
+
+fn box_distance(fx: f64, fy: f64, region: u8) -> f64 {
+    let x0 = (region % 2) as f64 * 64.0;
+    let y0 = (region / 2) as f64 * 64.0;
+    let cx = fx.max(x0).min(x0 + 64.0);
+    let cy = fy.max(y0).min(y0 + 64.0);
+    let dx = fx - cx;
+    let dy = fy - cy;
+    (dx * dx + dy * dy).sqrt()
+}
+
 pub struct GravityWorld {
     pub seed: u64,
     pub bodies: Vec<Body>,
@@ -68,6 +120,7 @@ pub struct GravityWorld {
     pub tick: u64,
     pub px: f64,
     pub py: f64,
+    pub observer: Option<Observer>,
 }
 
 pub fn initial_conditions(seed: u64, count: u32) -> Vec<Body> {
@@ -119,7 +172,12 @@ impl GravityWorld {
             tick: 0,
             px,
             py,
+            observer: None,
         }
+    }
+
+    pub fn set_observer(&mut self, offset: u64) {
+        self.observer = Some(Observer::new(self.seed, offset));
     }
 
     pub fn schedule(&mut self, tick: u64, region: u8, to_coarse: bool) {
@@ -130,7 +188,7 @@ impl GravityWorld {
     }
 
     fn eval_fit(fit: &Fit, t: u64) -> (f64, f64, f64, f64) {
-        let s = -1.0 + ((t - fit.t0) as f64) / 32.0;
+        let s = -1.0 + ((t - fit.t0) as f64) / 16.0;
         (
             clenshaw(&fit.c[0], s),
             clenshaw(&fit.c[1], s),
@@ -310,6 +368,30 @@ impl GravityWorld {
                     self.promote_region(region, entering);
                 }
             }
+        }
+        if entering >= 17 && entering % 16 == 1 && self.observer.is_some() {
+            let (fx, fy) = self.observer.as_mut().expect("observer").focus(entering);
+            let mut fired: Vec<(u8, bool)> = Vec::new();
+            for region in 0..4u8 {
+                let d = box_distance(fx, fy, region);
+                if !self.region_coarse[region as usize] && d > 48.0 {
+                    fired.push((region, true));
+                } else if self.region_coarse[region as usize] && d < 24.0 {
+                    fired.push((region, false));
+                }
+            }
+            for &(region, to_coarse) in &fired {
+                if to_coarse {
+                    self.demote_region(region, entering);
+                } else {
+                    self.promote_region(region, entering);
+                }
+            }
+            self.observer
+                .as_mut()
+                .expect("observer")
+                .policy_events
+                .extend(fired);
         }
         for region in 0..4u8 {
             if self.region_coarse[region as usize] {

@@ -235,7 +235,7 @@ Cholesky factorization in the fixed loop order:
   L[i][j] = (G[i][j] - sum_{k<j} L[i][k]*L[j][k]) / L[j][j]   (i > j)
 followed by forward and back substitution in index order (G is positive
 definite; no pivoting). Every operation is in the section 11 closure.
-Evaluation at tick t in [t0, t0 + 32] uses s = -1.0 + (t - t0) / 32.0
+Evaluation at tick t in [t0, t0 + 32] uses s = -1.0 + (t - t0) / 16.0
 and Clenshaw's recurrence; coefficients are stored per body per window.
 
 During the window, the body's emitted position and velocity are the
@@ -299,3 +299,36 @@ Emission contract of the reference CLI in gravity mode:
    windows must stay within tolerance, and cumulative momentum and
    energy drift must stay within tolerance. Tolerances live in the
    verifier's check framework, not in this format spec.
+
+## 18. Zoom policy (observer-driven level changes, version 2)
+
+When the reference CLI runs gravity mode with `--observer <offset>` (u64),
+a deterministic observer focus drives region levels automatically. The
+generator is normative; verifiers reproduce it exactly:
+
+- A dedicated splitmix64 instance seeded with seed XOR offset draws two
+  values per control point, in order: P_0, P_1, ... with
+  P_k = (16.0 + u0 * 2^-64 * 96.0, 16.0 + u1 * 2^-64 * 96.0).
+  Control point k covers ticks [1 + 64k, 64 + 64k]; the focus during that
+  span is the linear blend
+  focus(t) = P_k + (P_{k+1} - P_k) * ((t - (1 + 64k)) / 64.0).
+  Draws happen in tick order; a verifier stepping ticks in order consumes
+  the same sequence.
+- At each tick boundary entering t where t mod 16 == 1 and t >= 17, in
+  region index order 0..3, let d = the Euclidean distance from focus(t)
+  to the region's box (0 if inside):
+  cx = min(max(fx, x0), x1); cy = min(max(fy, y0), y1);
+  d = sqrt((fx-cx)*(fx-cx) + (fy-cy)*(fy-cy)).
+  - a Fine region with d > 48.0 demotes (RegionLevel 0)
+  - a Coarse region with d < 24.0 promotes (RegionLevel 1)
+  Events apply at that boundary, in that order, before the tick. Between
+  24.0 and 48.0 nothing changes (hysteresis).
+- Event ordering at one boundary: zoom-policy events apply in the same
+  phase as CLI-scheduled events (both, in stream order, before window
+  re-fits), so a verifier that applies RegionLevel records on encounter
+  reproduces the run bit-exactly without knowing the policy. The CLI emits
+  one RegionLevel record per fired policy event, in region order,
+  immediately before that tick's TickHeader.
+- Run-dir metadata: ontos.json may carry "observer": <offset>. When
+  present, verifiers must check that the stream's RegionLevel sequence
+  equals the policy's expected sequence exactly.
