@@ -42,8 +42,12 @@ all simval-verified:
   cross-verifies freshly generated streams with the simval oracle on every
   push.
 
-Phase 2 remaining: REBOUND anchoring for the far field, zoom policy.
-Next: see [docs/DESIGN.md](docs/DESIGN.md).
+Phase 2 closed 2026-09-07: REBOUND anchoring (simval's independent
+integrator agrees < 1e-4 relative) and the zoom policy (deterministic
+observer focus drives promote/demote, verified in-stream). Phase 3
+viewer v1: light-system `ontos_view` plays back gravity streams
+(validation-clean, headless smoke mode). Next: Phase 4 experiments, gated
+on the seam staying boring — see [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Determinism contract
 

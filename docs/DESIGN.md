@@ -87,15 +87,22 @@ The physics engine is not a dependency of this project. It is the product.
   push. A third independent implementation (C++ stream dump, in light-system
   `tools/ontos/`) agrees bit-for-bit. Stream spec v1 frozen: changes require
   a version bump and a coordinated simval update.
-- **Phase 2 — gravity epoch:** core mechanics DONE 2026-09-06 (spec v2:
-  leapfrog + momentum ledger, Chebyshev ephemeris windows with automatic
-  re-fits, one-sided seam forces with bounded drift; bit-verified by three
-  implementations, drift-checked by simval). Remaining: REBOUND anchoring,
-  zoom policy (who promotes/demotes, when), performance.
-- **Phase 3 — viewer:** light-system consumes the stream (draws); contact
-  events drive modal synthesis into an audio callback on its own thread.
-  The C++ stream parser spike already lives in light-system `tools/ontos/`;
-  the viewer itself waits for Phase 2's radiance/pressure fields.
+- **Phase 2 — gravity epoch:** DONE 2026-09-07. Spec v2 (leapfrog +
+  momentum ledger, Chebyshev ephemeris windows with automatic re-fits,
+  one-sided seam forces), REBOUND anchoring in simval (independent
+  integrator agrees < 1e-4 relative), and the zoom policy (section 18:
+  deterministic observer focus drives promote/demote with hysteresis;
+  policy events verified by simval's `ontos_zoom_policy` check).
+  Window drift: position deviation < 5e-4, ledger drift < 1e-2, energy
+  drift < 2e-4 across goldens. The eval-mapping fix (s in [-1,1] over
+  the window, not [-1,0]) cut position drift 25x.
+- **Phase 3 — viewer:** v1 DONE 2026-09-07. light-system `ontos_view`
+  plays back v2 streams: instanced billboard bodies colored by
+  region/level, region grid, playback controls, validation-clean, and a
+  `--frames` headless smoke mode. `tools/ontos/ontos_stream_dump.cpp`
+  remains the third bit-exact spec implementation. Audio (modal
+  synthesis from contact events) waits for contact physics; bodies have
+  no collisions yet.
 - **Phase 4 — reconstruction:** fine-detail synthesis under coarse
   constraints. Timeboxed experiments; simval bounds the error. Gate: Phase
   2's seam must be boring first.
