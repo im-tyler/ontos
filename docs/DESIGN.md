@@ -103,9 +103,14 @@ The physics engine is not a dependency of this project. It is the product.
   remains the third bit-exact spec implementation. Audio (modal
   synthesis from contact events) waits for contact physics; bodies have
   no collisions yet.
-- **Phase 4 — reconstruction:** fine-detail synthesis under coarse
-  constraints. Timeboxed experiments; simval bounds the error. Gate: Phase
-  2's seam must be boring first.
+- **Phase 4 — reconstruction:** v1 experiment DONE 2026-09-07 (spec
+  section 19: collapse to totals-only monopole + deterministic
+  reconstruction on expansion with exact momentum residual). Verified
+  bit-exact by three implementations; simval bounds reconstruction error
+  (post-expansion deviation ~10-12 on goldens, tolerance 64; ledger drift
+  < 1e-2) and the orchestrator sweeps parameter grids with MAD-outlier
+  detection. Open: collapse-on-coarse composition semantics, tighter
+  reconstruction (constrained synthesis beyond monopole+residual).
 
 ## Non-goals
 
