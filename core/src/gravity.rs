@@ -19,7 +19,7 @@ impl SplitMix64 {
         SplitMix64 { state: seed }
     }
 
-    pub fn next(&mut self) -> u64 {
+    pub fn draw(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -74,11 +74,11 @@ pub fn initial_conditions(seed: u64, count: u32) -> Vec<Body> {
     let mut rng = SplitMix64::new(seed);
     let mut bodies = Vec::with_capacity(count as usize);
     for id in 0..count {
-        let u0 = rng.next();
-        let u1 = rng.next();
-        let u2 = rng.next();
-        let u3 = rng.next();
-        let u4 = rng.next();
+        let u0 = rng.draw();
+        let u1 = rng.draw();
+        let u2 = rng.draw();
+        let u3 = rng.draw();
+        let u4 = rng.draw();
         bodies.push(Body {
             id,
             mass: 0.5 + (u0 as f64) * 2.0f64.powi(-64) * 2.0,
@@ -162,8 +162,8 @@ impl GravityWorld {
         let mut cur: Vec<Body> = bodies.to_vec();
         for k in 1..SAMPLES {
             Self::leapfrog_restricted(&mut cur);
-            for (i, b) in cur.iter().enumerate() {
-                samples[i][k] = *b;
+            for (row, b) in samples.iter_mut().zip(cur.iter()) {
+                row[k] = *b;
             }
         }
         samples
@@ -205,8 +205,8 @@ impl GravityWorld {
                 let inv3 = 1.0 / (s2 * s2.sqrt());
                 let fx = G * inv3 * dx;
                 let fy = G * inv3 * dy;
-                let i_active = skip.map_or(true, |f| !f(i));
-                let j_active = skip.map_or(true, |f| !f(j));
+                let i_active = skip.is_none_or(|f| !f(i));
+                let j_active = skip.is_none_or(|f| !f(j));
                 if i_active {
                     ax[i] += bodies[j].mass * fx;
                     ay[i] += bodies[j].mass * fy;
@@ -317,7 +317,7 @@ impl GravityWorld {
                     self.body_region[i] == region
                         && self.coarse[i]
                             .as_ref()
-                            .map_or(false, |f| entering == f.t0 + WINDOW)
+                            .is_some_and(|f| entering == f.t0 + WINDOW)
                 });
                 if ended {
                     self.refit_region(region, entering);
@@ -344,18 +344,18 @@ impl GravityWorld {
                 self.py += self.bodies[i].mass * (ay_fc[i] * half);
             }
         }
-        for i in 0..n {
+        for (i, b) in self.bodies.iter_mut().enumerate() {
             if !coarse[i] {
-                self.bodies[i].x += self.bodies[i].vx * DT;
-                self.bodies[i].y += self.bodies[i].vy * DT;
+                b.x += b.vx * DT;
+                b.y += b.vy * DT;
             }
         }
         let view: Vec<Body> = (0..n).map(|i| self.body_state_at(i, entering)).collect();
         let (ax_ff, ay_ff, ax_fc, ay_fc) = accel_split(&view, &coarse);
-        for i in 0..n {
+        for (i, b) in self.bodies.iter_mut().enumerate() {
             if !coarse[i] {
-                self.bodies[i].vx += ax_ff[i] * half;
-                self.bodies[i].vy += ay_ff[i] * half;
+                b.vx += ax_ff[i] * half;
+                b.vy += ay_ff[i] * half;
             }
         }
         for i in 0..n {
@@ -508,6 +508,7 @@ fn project(samples: &[Body; SAMPLES], get: impl Fn(&Body) -> f64) -> [f64; 9] {
     let mut w = [1.0f64; SAMPLES];
     w[0] = 0.5;
     w[SAMPLES - 1] = 0.5;
+    #[allow(clippy::needless_range_loop)]
     for k in 0..SAMPLES {
         let s = -1.0 + (k as f64) / 16.0;
         t[0][k] = 1.0;
@@ -537,6 +538,7 @@ fn project(samples: &[Body; SAMPLES], get: impl Fn(&Body) -> f64) -> [f64; 9] {
     cholesky_solve(&g, &b)
 }
 
+#[allow(clippy::needless_range_loop)]
 fn cholesky_solve(g: &[[f64; 9]; 9], b: &[f64; 9]) -> [f64; 9] {
     let n = DEGREE + 1;
     let mut l = [[0.0f64; 9]; 9];
@@ -579,8 +581,8 @@ mod tests {
     #[test]
     fn splitmix64_reference() {
         let mut rng = SplitMix64::new(42);
-        let a = rng.next();
-        let b = rng.next();
+        let a = rng.draw();
+        let b = rng.draw();
         assert_ne!(a, 0);
         assert_ne!(b, a);
     }
@@ -639,10 +641,10 @@ mod tests {
             s.x = (k as f64) * 0.1 * (k as f64) * 0.05 + 1.0;
         }
         let c = project(&samples, |b| b.x);
-        for k in 0..SAMPLES {
+        for (k, sample) in samples.iter().enumerate() {
             let s = -1.0 + (k as f64) / 16.0;
             let approx = clenshaw(&c, s);
-            assert!((approx - samples[k].x).abs() < 1e-9);
+            assert!((approx - sample.x).abs() < 1e-9);
         }
     }
 }
