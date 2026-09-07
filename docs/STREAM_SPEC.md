@@ -332,3 +332,65 @@ generator is normative; verifiers reproduce it exactly:
 - Run-dir metadata: ontos.json may carry "observer": <offset>. When
   present, verifiers must check that the stream's RegionLevel sequence
   equals the policy's expected sequence exactly.
+
+## 19. Phase 4 experiment: collapse and reconstruction (version 2)
+
+Collapse is a lossy coarse mode for regions: the region compresses to
+TOTALS ONLY (monopole), individual bodies stop being tracked, and on
+expansion the fine state is synthesized deterministically under the
+totals. This section is experimental; simval bounds the reconstruction
+error.
+
+- RegionLevel level byte 2 means collapse (0 demote/ephemeris, 1
+  promote/expand, 2 collapse). Level 2 is valid only in version 2.
+- New record, emitted when a collapse is applied:
+  tag 8 RegionCollapsed: u64 tick, u32 region_x, u32 region_y,
+    u64 body_count N, f64 mass, f64 com_x, f64 com_y, f64 px, f64 py,
+    f64 energy
+  Totals at collapse (fixed summation order, bodies in id order):
+  mass = sum m_i; com = sum m_i * pos / mass; px, py = sum m_i * v;
+  energy = the section 15 formula over the region's bodies only.
+
+- While a region is collapsed it acts as a SINGLE body of mass M at com
+  for gravity: fine bodies accumulate acceleration from (M, com), one
+  pair per fine body per collapsed region, in region index order after
+  all individual-body pairs. The collapsed region receives no forces;
+  com and v_com = (px/M, py/M) are frozen for the collapse's duration.
+- Bodies of a collapsed region still emit BodyState every tick with
+  level = 2: x = com_x + jx_i, y = com_y + jy_i, vx = v_com_x,
+  vy = v_com_y, mass = m_i (their real masses — masses are never
+  destroyed), where the jitter offsets come from a dedicated splitmix64
+  seeded seed ^ (region * 0x9E3779B97F4A7C15 wrapped) drawing two values
+  per body in id order at collapse time:
+  jx_i = ((u * 2^-64) - 0.5) * 8.0, jy likewise. Jitter is drawn once
+  and frozen; body states under collapse are static in time.
+
+- Expansion (RegionLevel level 1 on a collapsed region at tick t):
+  positions x_i = com_x + jx_i (the same frozen jitter), and velocities
+  v_i = v_com + s_i for i < N-1 with spread s_i from two more
+  splitmix64 draws per body in id order from the same generator state:
+  s_i = ((u * 2^-64) - 0.5) * 0.1 per axis; the last body absorbs the
+  exact residual: v_{N-1} = (P - sum_{i<N-1} m_i * v_i) / m_{N-1},
+  component-wise, with the sum in id order. All bodies become Fine;
+  integration resumes. The residual formula is part of the format: any
+  conforming implementation must produce bit-identical velocities.
+
+- Hashes: body state bytes under collapse use level byte 2 and the
+  synthesized fields exactly as emitted. Region hash covers the region's
+  bodies with their emitted (synthesized) states. The collapsed region
+  contributes its synthesized body states to world/region hashes and
+  totals like any other body.
+
+- Momentum ledger: forces between a fine body and a collapsed region
+  are one-sided (fine accumulates); the ledger updates follow section
+  13 rules for those pairs (collapsed = coarse for ledger purposes).
+
+- Verification: bit-match as usual, plus (check framework, not format):
+  reconstruction error = deviation of the post-expansion continuation
+  from an all-fine reference run, and energy non-conservation of the
+  synthesized set vs the collapse record's energy field. Both are
+  tolerance checks owned by the verifier.
+
+CLI: `--collapse-at T RX RY` and `--expand-at T RX RY` schedule the
+events; the CLI emits RegionLevel records (level 2 for collapse) and the
+RegionCollapsed record at the collapse boundary, before the TickHeader.
