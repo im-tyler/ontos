@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --release
+
+      - name: Bit-identical replay against committed golden stream
+        run: |
+          cargo run -q --release --bin ontos -- --ticks 200 --seed 7 --demote 1 0 --demote 0 1 --promote 1 0 --out /tmp/mixed.stream
+          cmp /tmp/mixed.stream core/tests/golden/mixed.stream
+          OUT=$(cargo run -q --release --bin ontos -- --ticks 200 --seed 7 --demote 1 0 --demote 0 1 --promote 1 0)
+          [ "$OUT" = "seed=7 ticks=200 population=4 hash=0e0e9764dad3ab42" ]
+          echo "bit-identical on ${{ matrix.os }}"
+
+  cross-verify:
+    runs-on: ubuntu-latest
+    name: verify streams with simval oracle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: im-tyler/simval
+          path: simval
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: cargo build --release
+      - name: Generate streams and verify with the independent Python reference
+        run: |
+          set -e
+          verify() {
+            ./target/release/ontos --ticks "$1" --seed "$2" "${@:3}" --out /tmp/case.stream
+            PYTHONPATH=simval/src python3 -m simval.ontos /tmp/case.stream "$2"
+          }
+          verify 64 42
+          verify 64 42 --demote 1 0
+          verify 64 42 --demote 0 0 --promote 0 0
+          verify 200 7 --demote 1 0 --demote 0 1 --promote 1 0
+          verify 300 123456789 --promote 1 1 --demote 1 1 --promote 1 1
+          verify 1 0

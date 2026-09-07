@@ -50,21 +50,33 @@ fn main() {
     let mut world = World::new(seed);
     world.seed_r_pentomino();
     let mut writer = out.map(|path| {
-        StreamWriter::new(File::create(&path).expect("failed to create stream"), 128, 128)
-            .expect("failed to write stream header")
+        StreamWriter::new(
+            File::create(&path).expect("failed to create stream"),
+            128,
+            128,
+        )
+        .expect("failed to write stream header")
     });
     for &(rx, ry) in &demote {
         world.set_level(rx, ry, Level::Coarse);
         if let Some(w) = writer.as_mut() {
-            w.write(&Record::RegionLevel { region_x: rx, region_y: ry, level: 0 })
-                .expect("stream write failed");
+            w.write(&Record::RegionLevel {
+                region_x: rx,
+                region_y: ry,
+                level: 0,
+            })
+            .expect("stream write failed");
         }
     }
     for &(rx, ry) in &promote {
         world.set_level(rx, ry, Level::Fine);
         if let Some(w) = writer.as_mut() {
-            w.write(&Record::RegionLevel { region_x: rx, region_y: ry, level: 1 })
-                .expect("stream write failed");
+            w.write(&Record::RegionLevel {
+                region_x: rx,
+                region_y: ry,
+                level: 1,
+            })
+            .expect("stream write failed");
         }
     }
 
@@ -73,8 +85,10 @@ fn main() {
         if let Some(w) = writer.as_mut() {
             w.write(&Record::TickHeader { tick: world.tick })
                 .expect("stream write failed");
-            w.write(&Record::Snapshot { population: world.population() })
-                .expect("stream write failed");
+            w.write(&Record::Snapshot {
+                population: world.population(),
+            })
+            .expect("stream write failed");
             for ry in 0..ontos_core::REGIONS_PER_AXIS {
                 for rx in 0..ontos_core::REGIONS_PER_AXIS {
                     let region = world.region(rx, ry);
