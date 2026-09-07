@@ -58,6 +58,43 @@ pub struct Fit {
     pub t0: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Action {
+    Demote,
+    Promote,
+    Collapse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionMode {
+    Fine,
+    Coarse,
+    Collapsed,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CollapsedBody {
+    pub jx: f64,
+    pub jy: f64,
+    pub sx: f64,
+    pub sy: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CollapseTotals {
+    pub tick: u64,
+    pub region: u8,
+    pub count: u64,
+    pub mass: f64,
+    pub com_x: f64,
+    pub com_y: f64,
+    pub px: f64,
+    pub py: f64,
+    pub energy: f64,
+    pub vcom_x: f64,
+    pub vcom_y: f64,
+}
+
 pub struct Observer {
     rng: SplitMix64,
     points: Vec<(f64, f64)>,
@@ -114,9 +151,12 @@ pub struct GravityWorld {
     pub seed: u64,
     pub bodies: Vec<Body>,
     pub coarse: Vec<Option<Fit>>,
+    pub collapsed: Vec<Option<CollapsedBody>>,
     pub body_region: Vec<u8>,
-    pub region_coarse: [bool; 4],
-    pub events: BTreeMap<u64, Vec<(u8, bool)>>,
+    pub region_mode: [RegionMode; 4],
+    pub region_totals: [Option<CollapseTotals>; 4],
+    pub collapse_records: Vec<CollapseTotals>,
+    pub events: BTreeMap<u64, Vec<(u8, Action)>>,
     pub tick: u64,
     pub px: f64,
     pub py: f64,
@@ -166,8 +206,11 @@ impl GravityWorld {
             seed,
             bodies,
             coarse: vec![None; count as usize],
+            collapsed: vec![None; count as usize],
             body_region: vec![UNMANAGED; count as usize],
-            region_coarse: [false; 4],
+            region_mode: [RegionMode::Fine; 4],
+            region_totals: [None; 4],
+            collapse_records: Vec::new(),
             events: BTreeMap::new(),
             tick: 0,
             px,
@@ -180,11 +223,12 @@ impl GravityWorld {
         self.observer = Some(Observer::new(self.seed, offset));
     }
 
-    pub fn schedule(&mut self, tick: u64, region: u8, to_coarse: bool) {
-        self.events
-            .entry(tick)
-            .or_default()
-            .push((region, to_coarse));
+    pub fn schedule(&mut self, tick: u64, region: u8, action: Action) {
+        self.events.entry(tick).or_default().push((region, action));
+    }
+
+    pub fn collapsed_totals(&self, region: u8) -> Option<&CollapseTotals> {
+        self.region_totals[region as usize].as_ref()
     }
 
     fn eval_fit(fit: &Fit, t: u64) -> (f64, f64, f64, f64) {
@@ -281,12 +325,14 @@ impl GravityWorld {
         let (x0, y0, x1, y1) = Self::box_of(region);
         let members: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| {
-                let b = self.body_state_at(i, t0);
-                b.x >= x0 && b.x < x1 && b.y >= y0 && b.y < y1
+                self.collapsed[i].is_none() && {
+                    let b = self.body_state_at(i, t0);
+                    b.x >= x0 && b.x < x1 && b.y >= y0 && b.y < y1
+                }
             })
             .collect();
         if members.is_empty() {
-            self.region_coarse[region as usize] = true;
+            self.region_mode[region as usize] = RegionMode::Coarse;
             return;
         }
         let subset: Vec<Body> = members.iter().map(|&i| self.body_state_at(i, t0)).collect();
@@ -303,7 +349,7 @@ impl GravityWorld {
             });
             self.body_region[i] = region;
         }
-        self.region_coarse[region as usize] = true;
+        self.region_mode[region as usize] = RegionMode::Coarse;
     }
 
     fn promote_region(&mut self, region: u8, t: u64) {
@@ -315,7 +361,162 @@ impl GravityWorld {
                 self.body_region[i] = UNMANAGED;
             }
         }
-        self.region_coarse[region as usize] = false;
+        self.region_mode[region as usize] = RegionMode::Fine;
+    }
+
+    fn collapse_region(&mut self, region: u8, t0: u64) {
+        let (x0, y0, x1, y1) = Self::box_of(region);
+        let members: Vec<usize> = (0..self.bodies.len())
+            .filter(|&i| {
+                self.collapsed[i].is_none() && {
+                    let b = self.body_state_at(i, t0);
+                    b.x >= x0 && b.x < x1 && b.y >= y0 && b.y < y1
+                }
+            })
+            .collect();
+        if members.is_empty() {
+            let totals = CollapseTotals {
+                tick: t0,
+                region,
+                count: 0,
+                mass: 0.0,
+                com_x: 0.0,
+                com_y: 0.0,
+                px: 0.0,
+                py: 0.0,
+                energy: 0.0,
+                vcom_x: 0.0,
+                vcom_y: 0.0,
+            };
+            self.region_totals[region as usize] = Some(totals);
+            self.collapse_records.push(totals);
+            self.region_mode[region as usize] = RegionMode::Collapsed;
+            return;
+        }
+        let states: Vec<Body> = members.iter().map(|&i| self.body_state_at(i, t0)).collect();
+        let mut mass = 0.0f64;
+        let mut mx = 0.0f64;
+        let mut my = 0.0f64;
+        let mut px = 0.0f64;
+        let mut py = 0.0f64;
+        let mut ke = 0.0f64;
+        for b in &states {
+            mass += b.mass;
+            mx += b.mass * b.x;
+            my += b.mass * b.y;
+            px += b.mass * b.vx;
+            py += b.mass * b.vy;
+            ke += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy);
+        }
+        let mut pe = 0.0f64;
+        for i in 0..states.len() {
+            for j in (i + 1)..states.len() {
+                let dx = states[j].x - states[i].x;
+                let dy = states[j].y - states[i].y;
+                let s2 = dx * dx + dy * dy + EPS2;
+                pe -= states[i].mass * states[j].mass / s2.sqrt();
+            }
+        }
+        let com_x = mx / mass;
+        let com_y = my / mass;
+        let vcom_x = px / mass;
+        let vcom_y = py / mass;
+        let mut rng = SplitMix64::new(self.seed ^ (region as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        let mut jitter = Vec::with_capacity(members.len());
+        for _ in 0..members.len() {
+            let ux = rng.draw();
+            let uy = rng.draw();
+            jitter.push((
+                ((ux as f64) * 2.0f64.powi(-64) - 0.5) * 8.0,
+                ((uy as f64) * 2.0f64.powi(-64) - 0.5) * 8.0,
+            ));
+        }
+        let mut spread = Vec::with_capacity(members.len());
+        for _ in 0..members.len() {
+            let ux = rng.draw();
+            let uy = rng.draw();
+            spread.push((
+                ((ux as f64) * 2.0f64.powi(-64) - 0.5) * 0.1,
+                ((uy as f64) * 2.0f64.powi(-64) - 0.5) * 0.1,
+            ));
+        }
+        for (slot, &i) in members.iter().enumerate() {
+            let (jx, jy) = jitter[slot];
+            let (sx, sy) = spread[slot];
+            self.collapsed[i] = Some(CollapsedBody { jx, jy, sx, sy });
+            self.coarse[i] = None;
+            self.body_region[i] = region;
+            self.bodies[i].x = com_x + jx;
+            self.bodies[i].y = com_y + jy;
+            self.bodies[i].vx = vcom_x;
+            self.bodies[i].vy = vcom_y;
+        }
+        let totals = CollapseTotals {
+            tick: t0,
+            region,
+            count: members.len() as u64,
+            mass,
+            com_x,
+            com_y,
+            px,
+            py,
+            energy: ke + pe,
+            vcom_x,
+            vcom_y,
+        };
+        self.region_totals[region as usize] = Some(totals);
+        self.collapse_records.push(totals);
+        self.region_mode[region as usize] = RegionMode::Collapsed;
+    }
+
+    fn expand_region(&mut self, region: u8) {
+        let members: Vec<usize> = (0..self.bodies.len())
+            .filter(|&i| self.collapsed[i].is_some() && self.body_region[i] == region)
+            .collect();
+        let totals = self.region_totals[region as usize].take();
+        if !members.is_empty() {
+            let t = totals.expect("collapsed region carries totals");
+            let mut sx = 0.0f64;
+            let mut sy = 0.0f64;
+            for &i in &members[..members.len() - 1] {
+                let c = self.collapsed[i].take().expect("collapsed body");
+                self.bodies[i].vx = t.vcom_x + c.sx;
+                self.bodies[i].vy = t.vcom_y + c.sy;
+                sx += self.bodies[i].mass * self.bodies[i].vx;
+                sy += self.bodies[i].mass * self.bodies[i].vy;
+            }
+            let last = members[members.len() - 1];
+            self.collapsed[last] = None;
+            self.bodies[last].vx = (t.px - sx) / self.bodies[last].mass;
+            self.bodies[last].vy = (t.py - sy) / self.bodies[last].mass;
+            for &i in &members {
+                self.body_region[i] = UNMANAGED;
+            }
+        }
+        self.region_mode[region as usize] = RegionMode::Fine;
+    }
+
+    fn apply_event(&mut self, region: u8, action: Action) {
+        let t = self.tick + 1;
+        match action {
+            Action::Demote => {
+                if self.region_mode[region as usize] != RegionMode::Collapsed {
+                    self.demote_region(region, t);
+                }
+            }
+            Action::Promote => {
+                if self.region_mode[region as usize] == RegionMode::Collapsed {
+                    self.expand_region(region);
+                } else {
+                    self.promote_region(region, t);
+                }
+            }
+            Action::Collapse => {
+                if self.region_mode[region as usize] != RegionMode::Collapsed {
+                    self.collapse_region(region, t);
+                }
+            }
+        }
     }
 
     fn refit_region(&mut self, region: u8, t: u64) {
@@ -339,7 +540,7 @@ impl GravityWorld {
             }
         }
         if keep.is_empty() {
-            self.region_coarse[region as usize] = false;
+            self.region_mode[region as usize] = RegionMode::Fine;
             return;
         }
         let subset: Vec<Body> = keep.iter().map(|&i| self.bodies[i]).collect();
@@ -361,12 +562,8 @@ impl GravityWorld {
     pub fn step(&mut self) {
         let entering = self.tick + 1;
         if let Some(events) = self.events.remove(&entering) {
-            for &(region, to_coarse) in &events {
-                if to_coarse {
-                    self.demote_region(region, entering);
-                } else {
-                    self.promote_region(region, entering);
-                }
+            for &(region, action) in &events {
+                self.apply_event(region, action);
             }
         }
         if entering >= 17 && entering % 16 == 1 && self.observer.is_some() {
@@ -374,18 +571,22 @@ impl GravityWorld {
             let mut fired: Vec<(u8, bool)> = Vec::new();
             for region in 0..4u8 {
                 let d = box_distance(fx, fy, region);
-                if !self.region_coarse[region as usize] && d > 48.0 {
+                let mode = self.region_mode[region as usize];
+                if mode == RegionMode::Fine && d > 48.0 {
                     fired.push((region, true));
-                } else if self.region_coarse[region as usize] && d < 24.0 {
+                } else if mode != RegionMode::Fine && d < 24.0 {
                     fired.push((region, false));
                 }
             }
             for &(region, to_coarse) in &fired {
-                if to_coarse {
-                    self.demote_region(region, entering);
-                } else {
-                    self.promote_region(region, entering);
-                }
+                self.apply_event(
+                    region,
+                    if to_coarse {
+                        Action::Demote
+                    } else {
+                        Action::Promote
+                    },
+                );
             }
             self.observer
                 .as_mut()
@@ -394,7 +595,7 @@ impl GravityWorld {
                 .extend(fired);
         }
         for region in 0..4u8 {
-            if self.region_coarse[region as usize] {
+            if self.region_mode[region as usize] == RegionMode::Coarse {
                 let ended = (0..self.bodies.len()).any(|i| {
                     self.body_region[i] == region
                         && self.coarse[i]
@@ -408,18 +609,36 @@ impl GravityWorld {
         }
 
         let n = self.bodies.len();
-        let coarse: Vec<bool> = (0..n).map(|i| self.coarse[i].is_some()).collect();
+        let kind: Vec<u8> = (0..n)
+            .map(|i| {
+                if self.coarse[i].is_some() {
+                    1
+                } else if self.collapsed[i].is_some() {
+                    2
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let mut monopoles: Vec<(f64, f64, f64)> = Vec::new();
+        for region in 0..4u8 {
+            if let Some(tot) = &self.region_totals[region as usize] {
+                if tot.count > 0 {
+                    monopoles.push((tot.mass, tot.com_x, tot.com_y));
+                }
+            }
+        }
         let half = DT * 0.5;
         let view: Vec<Body> = (0..n).map(|i| self.body_state_at(i, entering)).collect();
-        let (ax_ff, ay_ff, ax_fc, ay_fc) = accel_split(&view, &coarse);
+        let (ax_ff, ay_ff, ax_fc, ay_fc) = accel_split(&view, &kind, &monopoles);
         for i in 0..n {
-            if !coarse[i] {
+            if kind[i] == 0 {
                 self.bodies[i].vx += ax_ff[i] * half;
                 self.bodies[i].vy += ay_ff[i] * half;
             }
         }
         for i in 0..n {
-            if !coarse[i] {
+            if kind[i] == 0 {
                 self.bodies[i].vx += ax_fc[i] * half;
                 self.bodies[i].vy += ay_fc[i] * half;
                 self.px += self.bodies[i].mass * (ax_fc[i] * half);
@@ -427,21 +646,21 @@ impl GravityWorld {
             }
         }
         for (i, b) in self.bodies.iter_mut().enumerate() {
-            if !coarse[i] {
+            if kind[i] == 0 {
                 b.x += b.vx * DT;
                 b.y += b.vy * DT;
             }
         }
         let view: Vec<Body> = (0..n).map(|i| self.body_state_at(i, entering)).collect();
-        let (ax_ff, ay_ff, ax_fc, ay_fc) = accel_split(&view, &coarse);
+        let (ax_ff, ay_ff, ax_fc, ay_fc) = accel_split(&view, &kind, &monopoles);
         for (i, b) in self.bodies.iter_mut().enumerate() {
-            if !coarse[i] {
+            if kind[i] == 0 {
                 b.vx += ax_ff[i] * half;
                 b.vy += ay_ff[i] * half;
             }
         }
         for i in 0..n {
-            if !coarse[i] {
+            if kind[i] == 0 {
                 self.bodies[i].vx += ax_fc[i] * half;
                 self.bodies[i].vy += ay_fc[i] * half;
                 self.px += self.bodies[i].mass * (ax_fc[i] * half);
@@ -459,7 +678,7 @@ impl GravityWorld {
         let mut mass = 0.0f64;
         let mut ke = 0.0f64;
         for b in &view {
-            if self.coarse[b.id as usize].is_some() {
+            if self.coarse[b.id as usize].is_some() || self.collapsed[b.id as usize].is_some() {
                 coarse += 1;
             } else {
                 fine += 1;
@@ -479,16 +698,25 @@ impl GravityWorld {
         (fine, coarse, mass, self.px, self.py, ke + pe)
     }
 
+    fn body_level(&self, i: usize) -> u8 {
+        if self.collapsed[i].is_some() {
+            2
+        } else if self.coarse[i].is_some() {
+            0
+        } else {
+            1
+        }
+    }
+
     pub fn body_state_bytes(&self, i: usize) -> Vec<u8> {
         let b = self.body_state_at(i, self.tick);
-        let level = if self.coarse[i].is_some() { 0u8 } else { 1u8 };
-        b.state_bytes(level)
+        b.state_bytes(self.body_level(i))
     }
 
     pub fn emitted_state(&self, i: usize) -> (Body, u8, u8) {
         let b = self.body_state_at(i, self.tick);
-        let level = if self.coarse[i].is_some() { 0u8 } else { 1u8 };
-        let region = if self.coarse[i].is_some() {
+        let level = self.body_level(i);
+        let region = if self.coarse[i].is_some() || self.collapsed[i].is_some() {
             self.body_region[i]
         } else {
             region_at(b.x, b.y)
@@ -509,7 +737,7 @@ impl GravityWorld {
         let n = self.bodies.len();
         let mut members: Vec<usize> = Vec::new();
         for i in 0..n {
-            if self.coarse[i].is_some() {
+            if self.coarse[i].is_some() || self.collapsed[i].is_some() {
                 if self.body_region[i] == region {
                     members.push(i);
                 }
@@ -520,10 +748,10 @@ impl GravityWorld {
                 }
             }
         }
-        let level = if self.region_coarse[region as usize] {
-            0u8
-        } else {
-            1u8
+        let level = match self.region_mode[region as usize] {
+            RegionMode::Coarse => 0u8,
+            RegionMode::Fine => 1u8,
+            RegionMode::Collapsed => 2u8,
         };
         let mut v = Vec::new();
         v.push(level);
@@ -534,7 +762,11 @@ impl GravityWorld {
     }
 }
 
-fn accel_split(view: &[Body], coarse: &[bool]) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+fn accel_split(
+    view: &[Body],
+    kind: &[u8],
+    monopoles: &[(f64, f64, f64)],
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let n = view.len();
     let mut ax_ff = vec![0.0f64; n];
     let mut ay_ff = vec![0.0f64; n];
@@ -548,23 +780,38 @@ fn accel_split(view: &[Body], coarse: &[bool]) -> (Vec<f64>, Vec<f64>, Vec<f64>,
             let inv3 = 1.0 / (s2 * s2.sqrt());
             let fx = G * inv3 * dx;
             let fy = G * inv3 * dy;
-            match (coarse[i], coarse[j]) {
-                (false, false) => {
+            match (kind[i], kind[j]) {
+                (0, 0) => {
                     ax_ff[i] += view[j].mass * fx;
                     ay_ff[i] += view[j].mass * fy;
                     ax_ff[j] -= view[i].mass * fx;
                     ay_ff[j] -= view[i].mass * fy;
                 }
-                (false, true) => {
+                (0, 1) => {
                     ax_fc[i] += view[j].mass * fx;
                     ay_fc[i] += view[j].mass * fy;
                 }
-                (true, false) => {
+                (1, 0) => {
                     ax_fc[j] -= view[i].mass * fx;
                     ay_fc[j] -= view[i].mass * fy;
                 }
-                (true, true) => {}
+                _ => {}
             }
+        }
+    }
+    for &(m, cx, cy) in monopoles {
+        for i in 0..n {
+            if kind[i] != 0 {
+                continue;
+            }
+            let dx = cx - view[i].x;
+            let dy = cy - view[i].y;
+            let s2 = dx * dx + dy * dy + EPS2;
+            let inv3 = 1.0 / (s2 * s2.sqrt());
+            let fx = G * inv3 * dx;
+            let fy = G * inv3 * dy;
+            ax_fc[i] += m * fx;
+            ay_fc[i] += m * fy;
         }
     }
     (ax_ff, ay_ff, ax_fc, ay_fc)
@@ -673,11 +920,30 @@ mod tests {
     fn gravity_replay_bit_identical() {
         let run = || {
             let mut w = GravityWorld::new(7, 12);
-            w.schedule(5, 1, true);
-            w.schedule(70, 1, false);
-            w.schedule(40, 2, true);
+            w.schedule(5, 1, Action::Demote);
+            w.schedule(70, 1, Action::Promote);
+            w.schedule(40, 2, Action::Demote);
             let mut hashes = Vec::new();
             for _ in 0..120 {
+                w.step();
+                hashes.push(w.world_hash());
+            }
+            hashes
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn collapse_expand_replay_bit_identical() {
+        let run = || {
+            let mut w = GravityWorld::new(11, 10);
+            w.schedule(30, 3, Action::Collapse);
+            w.schedule(120, 3, Action::Promote);
+            w.schedule(50, 0, Action::Collapse);
+            w.schedule(60, 0, Action::Promote);
+            w.schedule(80, 2, Action::Demote);
+            let mut hashes = Vec::new();
+            for _ in 0..200 {
                 w.step();
                 hashes.push(w.world_hash());
             }
@@ -707,6 +973,189 @@ mod tests {
         }
         let e1 = w.totals().5;
         assert!((e1 - e0).abs() / e0.abs() < 1e-6);
+    }
+
+    #[test]
+    fn collapse_all_bodies_freezes_ledger_exactly() {
+        let mut world = None;
+        for seed in 0..100_000u64 {
+            let w = GravityWorld::new(seed, 4);
+            let all_in = w
+                .bodies
+                .iter()
+                .all(|b| b.x >= 64.0 && b.x < 128.0 && b.y >= 64.0 && b.y < 128.0);
+            if all_in {
+                world = Some(w);
+                break;
+            }
+        }
+        let mut w = world.expect("seed with all bodies in region 3");
+        let (_, _, _, px0, py0, _) = w.totals();
+        w.schedule(1, 3, Action::Collapse);
+        for _ in 0..50 {
+            w.step();
+            let (_, _, _, px, py, _) = w.totals();
+            assert_eq!((px, py), (px0, py0));
+        }
+        w.schedule(52, 3, Action::Promote);
+        for _ in 0..50 {
+            w.step();
+            let (_, _, _, px, py, _) = w.totals();
+            assert_eq!((px, py), (px0, py0));
+        }
+        assert!(w.collapsed.iter().all(|c| c.is_none()));
+    }
+
+    #[test]
+    fn expansion_residual_momentum_matches_totals() {
+        let mut world = None;
+        for seed in 0..100_000u64 {
+            let w = GravityWorld::new(seed, 5);
+            let all_in = w
+                .bodies
+                .iter()
+                .all(|b| b.x >= 64.0 && b.x < 128.0 && b.y >= 64.0 && b.y < 128.0);
+            if all_in {
+                world = Some(w);
+                break;
+            }
+        }
+        let mut w = world.expect("seed with all bodies in region 3");
+        w.schedule(1, 3, Action::Collapse);
+        w.schedule(60, 3, Action::Promote);
+        for _ in 0..60 {
+            w.step();
+        }
+        assert_eq!(w.collapse_records.len(), 1);
+        let rec = w.collapse_records[0];
+        let mut sx = 0.0f64;
+        let mut sy = 0.0f64;
+        for b in &w.bodies {
+            sx += b.mass * b.vx;
+            sy += b.mass * b.vy;
+        }
+        let ulp_x = (sx - rec.px).abs() / (rec.px.abs() * f64::EPSILON);
+        let ulp_y = (sy - rec.py).abs() / (rec.py.abs() * f64::EPSILON);
+        assert!(ulp_x <= 8.0, "sum m vx vs P: {ulp_x} ULP");
+        assert!(ulp_y <= 8.0, "sum m vy vs P: {ulp_y} ULP");
+    }
+
+    #[test]
+    fn collapsed_states_static_and_level_two() {
+        let mut w = GravityWorld::new(13, 12);
+        w.schedule(40, 0, Action::Collapse);
+        let mut first: Option<Vec<(Body, u8, u8)>> = None;
+        while w.tick < 80 {
+            w.step();
+            if w.tick >= 41 {
+                let states: Vec<(Body, u8, u8)> = (0..w.bodies.len())
+                    .map(|i| w.emitted_state(i))
+                    .filter(|&(_, _, level)| level == 2)
+                    .collect();
+                assert!(!states.is_empty());
+                assert!(states.iter().all(|&(_, region, _)| region == 0));
+                if let Some(f) = &first {
+                    assert_eq!(&states, f, "collapsed body states are static");
+                } else {
+                    first = Some(states);
+                }
+            }
+        }
+        let (level, _, _) = w.region_hash(0);
+        assert_eq!(level, 2);
+        w.schedule(w.tick + 1, 0, Action::Promote);
+        w.step();
+        let (level, _, _) = w.region_hash(0);
+        assert_eq!(level, 1);
+        for i in 0..w.bodies.len() {
+            let (_, _, level) = w.emitted_state(i);
+            assert_eq!(level, 1);
+        }
+    }
+
+    #[test]
+    fn collapse_empty_region_emits_zero_totals() {
+        let mut w = GravityWorld::new(11, 10);
+        let mut target = None;
+        while w.tick < 40 {
+            w.step();
+            for region in 0..4u8 {
+                let x0 = (region % 2) as f64 * 64.0;
+                let y0 = (region / 2) as f64 * 64.0;
+                let occupied = w
+                    .bodies
+                    .iter()
+                    .any(|b| b.x >= x0 && b.x < x0 + 64.0 && b.y >= y0 && b.y < y0 + 64.0);
+                if !occupied {
+                    target = Some((w.tick + 1, region));
+                    break;
+                }
+            }
+            if target.is_some() {
+                break;
+            }
+        }
+        let (t, region) = target.expect("found an empty region box");
+        w.schedule(t, region, Action::Collapse);
+        for _ in 0..10 {
+            w.step();
+        }
+        assert_eq!(w.collapse_records.len(), 1);
+        let rec = w.collapse_records[0];
+        assert_eq!(rec.tick, t);
+        assert_eq!(rec.region, region);
+        assert_eq!(rec.count, 0);
+        assert_eq!(rec.mass, 0.0);
+        assert_eq!(rec.com_x, 0.0);
+        assert_eq!(rec.com_y, 0.0);
+        assert_eq!(rec.px, 0.0);
+        assert_eq!(rec.py, 0.0);
+        assert_eq!(rec.energy, 0.0);
+        let (level, pop, _) = w.region_hash(region);
+        assert_eq!((level, pop), (2, 0));
+        let (_, _, mass, _, _, energy) = w.totals();
+        assert!(mass.is_finite() && energy.is_finite());
+        w.schedule(w.tick + 1, region, Action::Promote);
+        w.step();
+        let (level, _, _) = w.region_hash(region);
+        assert_eq!(level, 1);
+    }
+
+    #[test]
+    fn demote_on_collapsed_region_is_noop() {
+        let mut w = GravityWorld::new(11, 10);
+        w.schedule(30, 3, Action::Collapse);
+        w.schedule(60, 3, Action::Demote);
+        while w.tick < 61 {
+            w.step();
+        }
+        assert_eq!(w.region_mode[3], RegionMode::Collapsed);
+        for i in 0..w.bodies.len() {
+            if w.body_region[i] == 3 {
+                assert!(w.collapsed[i].is_some());
+                assert!(w.coarse[i].is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn collapse_monopole_ledger_drift_bounded() {
+        let mut w = GravityWorld::new(11, 10);
+        let (_, _, _, px0, py0, e0) = w.totals();
+        w.schedule(30, 3, Action::Collapse);
+        w.schedule(120, 3, Action::Promote);
+        let mut e_mid = 0.0f64;
+        for _ in 0..200 {
+            w.step();
+            if w.tick == 60 {
+                e_mid = w.totals().5;
+            }
+        }
+        let (_, _, _, px1, py1, e1) = w.totals();
+        assert!((px1 - px0).abs() < 5e-3, "px drift {}", (px1 - px0).abs());
+        assert!((py1 - py0).abs() < 5e-3, "py drift {}", (py1 - py0).abs());
+        assert!((e1 - e_mid).abs() / e_mid.abs() < 0.05);
+        assert!((e1 - e0).abs() / e0.abs() < 0.5);
     }
 
     #[test]

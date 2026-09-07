@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::path::Path;
 
-use ontos_core::gravity::GravityWorld;
+use ontos_core::gravity::{Action, GravityWorld};
 use ontos_stream::{Record, StreamReader};
 
 fn verify_golden_gravity(name: &str, seed: u64) {
@@ -15,7 +15,8 @@ fn verify_golden_gravity(name: &str, seed: u64) {
         .expect("gravity stream must carry body_count");
 
     let mut world = GravityWorld::new(seed, body_count);
-    let mut pending: Vec<(u8, bool)> = Vec::new();
+    let mut pending: Vec<(u8, Action)> = Vec::new();
+    let mut collapse_records: Vec<Record> = Vec::new();
     let mut body_index = 0usize;
     let mut last_tick = 0u64;
 
@@ -23,12 +24,52 @@ fn verify_golden_gravity(name: &str, seed: u64) {
         match record {
             Record::Header { .. } => panic!("header record mid-stream"),
             Record::TickHeader { tick } => {
-                for &(region, to_coarse) in &pending {
-                    world.schedule(world.tick + 1, region, to_coarse);
+                for &(region, action) in &pending {
+                    world.schedule(world.tick + 1, region, action);
                 }
                 pending.clear();
                 world.step();
                 assert_eq!(tick, world.tick, "{name}: tick divergence at {tick}");
+                for rec in collapse_records.drain(..) {
+                    if let Record::RegionCollapsed {
+                        tick,
+                        region_x,
+                        region_y,
+                        body_count,
+                        mass,
+                        com_x,
+                        com_y,
+                        px,
+                        py,
+                        energy,
+                    } = rec
+                    {
+                        assert_eq!(tick, world.tick, "{name}: RegionCollapsed tick");
+                        let region = (region_y * 2 + region_x) as u8;
+                        let tot = world
+                            .collapsed_totals(region)
+                            .expect("{name}: region collapsed at record");
+                        assert_eq!(body_count, tot.count, "{name}: collapse count");
+                        assert_eq!(mass.to_bits(), tot.mass.to_bits(), "{name}: collapse mass");
+                        assert_eq!(
+                            com_x.to_bits(),
+                            tot.com_x.to_bits(),
+                            "{name}: collapse com_x"
+                        );
+                        assert_eq!(
+                            com_y.to_bits(),
+                            tot.com_y.to_bits(),
+                            "{name}: collapse com_y"
+                        );
+                        assert_eq!(px.to_bits(), tot.px.to_bits(), "{name}: collapse px");
+                        assert_eq!(py.to_bits(), tot.py.to_bits(), "{name}: collapse py");
+                        assert_eq!(
+                            energy.to_bits(),
+                            tot.energy.to_bits(),
+                            "{name}: collapse energy"
+                        );
+                    }
+                }
                 body_index = 0;
                 last_tick = tick;
             }
@@ -45,8 +86,14 @@ fn verify_golden_gravity(name: &str, seed: u64) {
                 region_y,
                 level,
             } => {
-                pending.push(((region_y * 2 + region_x) as u8, level == 0));
+                let action = match level {
+                    0 => Action::Demote,
+                    1 => Action::Promote,
+                    _ => Action::Collapse,
+                };
+                pending.push(((region_y * 2 + region_x) as u8, action));
             }
+            Record::RegionCollapsed { .. } => collapse_records.push(record),
             Record::RegionState {
                 tick,
                 region_x,
@@ -167,4 +214,14 @@ fn golden_gravity_multi() {
 #[test]
 fn golden_gravity_observer() {
     verify_golden_gravity("g_observer.stream", 5);
+}
+
+#[test]
+fn golden_gravity_collapse() {
+    verify_golden_gravity("g_collapse.stream", 11);
+}
+
+#[test]
+fn golden_gravity_collapse_observer() {
+    verify_golden_gravity("g_collapse_observer.stream", 13);
 }

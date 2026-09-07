@@ -391,6 +391,22 @@ error.
   synthesized set vs the collapse record's energy field. Both are
   tolerance checks owned by the verifier.
 
+Normative clarifications (implementation-consensus 2026-09-07):
+- RegionCollapsed payload is 72 bytes plus the tag byte (8+4+4+8+48).
+- Expansion spread draws: 2*(N-1) values, for bodies 0..N-2 in id order
+  (the residual body draws nothing).
+- TotalsState coarse_count includes collapsed bodies (fine + coarse = N).
+- The jitter generator re-seeds at every collapse (identical membership
+  yields identical jitter across collapse cycles).
+- Collapsing an ephemeris-coarse region first materializes polynomial
+  evaluations at the collapse tick, then selects in-box bodies.
+- RegionLevel demote on a collapsed region is a no-op.
+- Collapse of an empty region emits the zero-totals record; monopole
+  skipped.
+- RegionState and region-hash level byte are 2 for collapsed regions.
+- Fine bodies entering a collapsed region's box hash in position-wise
+  and are not absorbed (mirrors section 14).
+
 CLI: `--collapse-at T RX RY` and `--expand-at T RX RY` schedule the
 events; the CLI emits RegionLevel records (level 2 for collapse) and the
 RegionCollapsed record at the collapse boundary, before the TickHeader.

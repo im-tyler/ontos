@@ -54,6 +54,18 @@ pub enum Record {
         py: f64,
         energy: f64,
     },
+    RegionCollapsed {
+        tick: u64,
+        region_x: u32,
+        region_y: u32,
+        body_count: u64,
+        mass: f64,
+        com_x: f64,
+        com_y: f64,
+        px: f64,
+        py: f64,
+        energy: f64,
+    },
 }
 
 pub struct StreamWriter<W: Write> {
@@ -166,6 +178,30 @@ impl<W: Write> StreamWriter<W> {
                 self.out.write_all(&py.to_le_bytes())?;
                 self.out.write_all(&energy.to_le_bytes())
             }
+            Record::RegionCollapsed {
+                tick,
+                region_x,
+                region_y,
+                body_count,
+                mass,
+                com_x,
+                com_y,
+                px,
+                py,
+                energy,
+            } => {
+                self.out.write_all(&[8u8])?;
+                self.out.write_all(&tick.to_le_bytes())?;
+                self.out.write_all(&region_x.to_le_bytes())?;
+                self.out.write_all(&region_y.to_le_bytes())?;
+                self.out.write_all(&body_count.to_le_bytes())?;
+                self.out.write_all(&mass.to_le_bytes())?;
+                self.out.write_all(&com_x.to_le_bytes())?;
+                self.out.write_all(&com_y.to_le_bytes())?;
+                self.out.write_all(&px.to_le_bytes())?;
+                self.out.write_all(&py.to_le_bytes())?;
+                self.out.write_all(&energy.to_le_bytes())
+            }
         }
     }
 
@@ -223,7 +259,7 @@ pub struct StreamReader<R: Read> {
     input: R,
     header: Option<(u32, u32)>,
     body_count: Option<u32>,
-    scratch: [u8; 56],
+    scratch: [u8; 72],
 }
 
 impl<R: Read> StreamReader<R> {
@@ -249,7 +285,7 @@ impl<R: Read> StreamReader<R> {
             input,
             header: Some((world_w, world_h)),
             body_count,
-            scratch: [0u8; 56],
+            scratch: [0u8; 72],
         })
     }
 
@@ -259,6 +295,14 @@ impl<R: Read> StreamReader<R> {
 
     pub fn body_count(&self) -> Option<u32> {
         self.body_count
+    }
+
+    fn max_level(&self) -> u8 {
+        if self.body_count.is_some() {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn next_record(&mut self) -> Result<Option<Record>, ParseError> {
@@ -292,7 +336,7 @@ impl<R: Read> StreamReader<R> {
             4 => {
                 self.take(9)?;
                 let level = self.scratch[8];
-                if level > 1 {
+                if level > self.max_level() {
                     return Err(ParseError::BadLevel(level));
                 }
                 Record::RegionLevel {
@@ -304,7 +348,7 @@ impl<R: Read> StreamReader<R> {
             5 => {
                 self.take(33)?;
                 let level = self.scratch[16];
-                if level > 1 {
+                if level > self.max_level() {
                     return Err(ParseError::BadLevel(level));
                 }
                 Record::RegionState {
@@ -319,7 +363,7 @@ impl<R: Read> StreamReader<R> {
             6 => {
                 self.take(54)?;
                 let level = self.scratch[13];
-                if level > 1 {
+                if level > self.max_level() {
                     return Err(ParseError::BadLevel(level));
                 }
                 Record::BodyState {
@@ -344,6 +388,21 @@ impl<R: Read> StreamReader<R> {
                     px: f64::from_le_bytes(self.scratch[32..40].try_into().unwrap()),
                     py: f64::from_le_bytes(self.scratch[40..48].try_into().unwrap()),
                     energy: f64::from_le_bytes(self.scratch[48..56].try_into().unwrap()),
+                }
+            }
+            8 => {
+                self.take(72)?;
+                Record::RegionCollapsed {
+                    tick: u64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
+                    region_x: u32::from_le_bytes(self.scratch[8..12].try_into().unwrap()),
+                    region_y: u32::from_le_bytes(self.scratch[12..16].try_into().unwrap()),
+                    body_count: u64::from_le_bytes(self.scratch[16..24].try_into().unwrap()),
+                    mass: f64::from_le_bytes(self.scratch[24..32].try_into().unwrap()),
+                    com_x: f64::from_le_bytes(self.scratch[32..40].try_into().unwrap()),
+                    com_y: f64::from_le_bytes(self.scratch[40..48].try_into().unwrap()),
+                    px: f64::from_le_bytes(self.scratch[48..56].try_into().unwrap()),
+                    py: f64::from_le_bytes(self.scratch[56..64].try_into().unwrap()),
+                    energy: f64::from_le_bytes(self.scratch[64..72].try_into().unwrap()),
                 }
             }
             t => return Err(ParseError::UnknownTag(t)),
@@ -544,5 +603,126 @@ mod tests {
             Some(Record::TickHeader { tick: 0 })
         );
         assert_eq!(r.next_record().unwrap_err(), ParseError::Truncated);
+    }
+
+    #[test]
+    fn region_collapsed_roundtrip_gravity() {
+        let mut buf = Vec::new();
+        let rec = Record::RegionCollapsed {
+            tick: 30,
+            region_x: 1,
+            region_y: 1,
+            body_count: 3,
+            mass: 4.25,
+            com_x: 80.5,
+            com_y: 81.5,
+            px: 0.125,
+            py: -0.25,
+            energy: -1.5,
+        };
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 10).unwrap();
+            w.write(&rec).unwrap();
+            w.flush().unwrap();
+        }
+        assert_eq!(&buf[0..4], MAGIC);
+        assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 2);
+        assert_eq!(buf[20], 8);
+        assert_eq!(buf.len(), 21 + 72);
+        let mut r = StreamReader::new(&buf[..]).unwrap();
+        assert_eq!(r.body_count(), Some(10));
+        assert_eq!(r.next_record().unwrap(), Some(rec));
+        assert_eq!(r.next_record().unwrap(), None);
+    }
+
+    #[test]
+    fn gravity_stream_accepts_level_two() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 4).unwrap();
+            w.write(&Record::RegionLevel {
+                region_x: 1,
+                region_y: 0,
+                level: 2,
+            })
+            .unwrap();
+            w.write(&Record::RegionState {
+                tick: 1,
+                region_x: 1,
+                region_y: 0,
+                level: 2,
+                population: 2,
+                hash: 7,
+            })
+            .unwrap();
+            w.write(&Record::BodyState {
+                tick: 1,
+                body_id: 0,
+                region: 2,
+                level: 2,
+                x: 1.0,
+                y: 2.0,
+                vx: 3.0,
+                vy: 4.0,
+                mass: 5.0,
+            })
+            .unwrap();
+            w.flush().unwrap();
+        }
+        let mut r = StreamReader::new(&buf[..]).unwrap();
+        assert_eq!(
+            r.next_record().unwrap(),
+            Some(Record::RegionLevel {
+                region_x: 1,
+                region_y: 0,
+                level: 2,
+            })
+        );
+        assert_eq!(
+            r.next_record().unwrap(),
+            Some(Record::RegionState {
+                tick: 1,
+                region_x: 1,
+                region_y: 0,
+                level: 2,
+                population: 2,
+                hash: 7,
+            })
+        );
+        assert_eq!(
+            r.next_record().unwrap(),
+            Some(Record::BodyState {
+                tick: 1,
+                body_id: 0,
+                region: 2,
+                level: 2,
+                x: 1.0,
+                y: 2.0,
+                vx: 3.0,
+                vy: 4.0,
+                mass: 5.0,
+            })
+        );
+    }
+
+    #[test]
+    fn gravity_stream_rejects_level_three() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 4).unwrap();
+            w.write(&Record::RegionLevel {
+                region_x: 0,
+                region_y: 0,
+                level: 3,
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            StreamReader::new(&buf[..])
+                .unwrap()
+                .next_record()
+                .unwrap_err(),
+            ParseError::BadLevel(3)
+        );
     }
 }
