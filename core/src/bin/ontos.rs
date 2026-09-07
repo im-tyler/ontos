@@ -1,8 +1,14 @@
 use std::fs::File;
 use std::path::PathBuf;
 
+use ontos_core::gravity::GravityWorld;
 use ontos_core::{Level, World};
 use ontos_stream::{Record, StreamWriter};
+
+enum Mode {
+    Life,
+    Gravity,
+}
 
 fn main() {
     let mut ticks: u64 = 100;
@@ -10,6 +16,9 @@ fn main() {
     let mut out: Option<PathBuf> = None;
     let mut demote: Vec<(u32, u32)> = Vec::new();
     let mut promote: Vec<(u32, u32)> = Vec::new();
+    let mut mode = Mode::Life;
+    let mut bodies: u32 = 8;
+    let mut events: Vec<(u64, u8, bool)> = Vec::new();
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -26,6 +35,18 @@ fn main() {
                 out = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
+            "--bodies" => {
+                bodies = args[i + 1].parse().expect("invalid bodies");
+                i += 2;
+            }
+            "--mode" => {
+                mode = match args[i + 1].as_str() {
+                    "life" => Mode::Life,
+                    "gravity" => Mode::Gravity,
+                    other => panic!("unknown mode {other}"),
+                };
+                i += 2;
+            }
             "--demote" => {
                 let rx: u32 = args[i + 1].parse().expect("invalid region x");
                 let ry: u32 = args[i + 2].parse().expect("invalid region y");
@@ -38,15 +59,44 @@ fn main() {
                 promote.push((rx, ry));
                 i += 3;
             }
+            "--demote-at" => {
+                let t: u64 = args[i + 1].parse().expect("invalid tick");
+                let rx: u32 = args[i + 2].parse().expect("invalid region x");
+                let ry: u32 = args[i + 3].parse().expect("invalid region y");
+                events.push((t, (ry * 2 + rx) as u8, true));
+                i += 4;
+            }
+            "--promote-at" => {
+                let t: u64 = args[i + 1].parse().expect("invalid tick");
+                let rx: u32 = args[i + 2].parse().expect("invalid region x");
+                let ry: u32 = args[i + 3].parse().expect("invalid region y");
+                events.push((t, (ry * 2 + rx) as u8, false));
+                i += 4;
+            }
             _ => {
                 eprintln!(
-                    "usage: ontos [--ticks N] [--seed S] [--out FILE] [--demote RX RY] [--promote RX RY]..."
+                    "usage: ontos [--mode life|gravity] [--ticks N] [--seed S] [--bodies N] [--out FILE]\n\
+                     life:    [--demote RX RY] [--promote RX RY]...\n\
+                     gravity: [--demote-at T RX RY] [--promote-at T RX RY]..."
                 );
                 std::process::exit(1);
             }
         }
     }
 
+    match mode {
+        Mode::Life => run_life(ticks, seed, out, demote, promote),
+        Mode::Gravity => run_gravity(ticks, seed, out, bodies, events),
+    }
+}
+
+fn run_life(
+    ticks: u64,
+    seed: u64,
+    out: Option<PathBuf>,
+    demote: Vec<(u32, u32)>,
+    promote: Vec<(u32, u32)>,
+) {
     let mut world = World::new(seed);
     world.seed_r_pentomino();
     let mut writer = out.map(|path| {
@@ -118,4 +168,110 @@ fn main() {
         world.population(),
         world.hash_state()
     );
+}
+
+fn run_gravity(
+    ticks: u64,
+    seed: u64,
+    out: Option<PathBuf>,
+    bodies: u32,
+    mut events: Vec<(u64, u8, bool)>,
+) {
+    events.sort();
+    events.dedup();
+    let mut world = GravityWorld::new(seed, bodies);
+    for &(t, region, to_coarse) in &events {
+        world.schedule(t, region, to_coarse);
+    }
+    let mut writer = out.map(|path| {
+        StreamWriter::new_gravity(
+            File::create(&path).expect("failed to create stream"),
+            128,
+            128,
+            bodies,
+        )
+        .expect("failed to write stream header")
+    });
+    for _ in 0..ticks {
+        let entering = world.tick + 1;
+        if let Some(t) = world.events.get(&entering) {
+            let t = t.clone();
+            for &(region, to_coarse) in &t {
+                let (rx, ry) = ((region % 2) as u32, (region / 2) as u32);
+                if let Some(w) = writer.as_mut() {
+                    w.write(&Record::RegionLevel {
+                        region_x: rx,
+                        region_y: ry,
+                        level: if to_coarse { 0 } else { 1 },
+                    })
+                    .expect("stream write failed");
+                }
+            }
+        }
+        world.step();
+        if let Some(w) = writer.as_mut() {
+            w.write(&Record::TickHeader { tick: world.tick })
+                .expect("stream write failed");
+            w.write(&Record::Snapshot {
+                population: world.bodies.len() as u64,
+            })
+            .expect("stream write failed");
+            let (fine, coarse, mass, px, py, energy) = world.totals();
+            w.write(&Record::TotalsState {
+                tick: world.tick,
+                fine_count: fine,
+                coarse_count: coarse,
+                mass,
+                px,
+                py,
+                energy,
+            })
+            .expect("stream write failed");
+            for region in 0..4u8 {
+                let (level, population, hash) = world.region_hash(region);
+                w.write(&Record::RegionState {
+                    tick: world.tick,
+                    region_x: (region % 2) as u32,
+                    region_y: (region / 2) as u32,
+                    level,
+                    population,
+                    hash,
+                })
+                .expect("stream write failed");
+            }
+            for i in 0..world.bodies.len() {
+                w.write(&body_state_record(&world, i))
+                    .expect("stream write failed");
+            }
+        }
+    }
+    if let Some(mut w) = writer {
+        w.flush().expect("flush failed");
+    }
+    let (.., px, py, energy) = world.totals();
+    println!(
+        "seed={} ticks={} bodies={} hash={:016x} px={:e} py={:e} E={:e}",
+        seed,
+        world.tick,
+        world.bodies.len(),
+        world.world_hash(),
+        px,
+        py,
+        energy
+    );
+}
+
+fn body_state_record(world: &GravityWorld, i: usize) -> Record {
+    let (b, region, level) = world.emitted_state(i);
+    Record::BodyState {
+        tick: world.tick,
+        body_id: b.id,
+        region,
+        level,
+        x: b.x,
+        y: b.y,
+        vx: b.vx,
+        vy: b.vy,
+        mass: b.mass,
+    }
 }

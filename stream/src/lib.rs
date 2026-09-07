@@ -2,8 +2,9 @@ use std::io::{self, Read, Write};
 
 pub const MAGIC: &[u8; 4] = b"ONTO";
 pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION_GRAVITY: u32 = 2;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Record {
     Header {
         world_w: u32,
@@ -33,6 +34,26 @@ pub enum Record {
         population: u64,
         hash: u64,
     },
+    BodyState {
+        tick: u64,
+        body_id: u32,
+        region: u8,
+        level: u8,
+        x: f64,
+        y: f64,
+        vx: f64,
+        vy: f64,
+        mass: f64,
+    },
+    TotalsState {
+        tick: u64,
+        fine_count: u64,
+        coarse_count: u64,
+        mass: f64,
+        px: f64,
+        py: f64,
+        energy: f64,
+    },
 }
 
 pub struct StreamWriter<W: Write> {
@@ -45,6 +66,20 @@ impl<W: Write> StreamWriter<W> {
         out.write_all(&FORMAT_VERSION.to_le_bytes())?;
         out.write_all(&world_w.to_le_bytes())?;
         out.write_all(&world_h.to_le_bytes())?;
+        Ok(StreamWriter { out })
+    }
+
+    pub fn new_gravity(
+        mut out: W,
+        world_w: u32,
+        world_h: u32,
+        body_count: u32,
+    ) -> io::Result<Self> {
+        out.write_all(MAGIC)?;
+        out.write_all(&FORMAT_VERSION_GRAVITY.to_le_bytes())?;
+        out.write_all(&world_w.to_le_bytes())?;
+        out.write_all(&world_h.to_le_bytes())?;
+        out.write_all(&body_count.to_le_bytes())?;
         Ok(StreamWriter { out })
     }
 
@@ -90,6 +125,46 @@ impl<W: Write> StreamWriter<W> {
                 self.out.write_all(&[*level])?;
                 self.out.write_all(&population.to_le_bytes())?;
                 self.out.write_all(&hash.to_le_bytes())
+            }
+            Record::BodyState {
+                tick,
+                body_id,
+                region,
+                level,
+                x,
+                y,
+                vx,
+                vy,
+                mass,
+            } => {
+                self.out.write_all(&[6u8])?;
+                self.out.write_all(&tick.to_le_bytes())?;
+                self.out.write_all(&body_id.to_le_bytes())?;
+                self.out.write_all(&[*region])?;
+                self.out.write_all(&[*level])?;
+                self.out.write_all(&x.to_le_bytes())?;
+                self.out.write_all(&y.to_le_bytes())?;
+                self.out.write_all(&vx.to_le_bytes())?;
+                self.out.write_all(&vy.to_le_bytes())?;
+                self.out.write_all(&mass.to_le_bytes())
+            }
+            Record::TotalsState {
+                tick,
+                fine_count,
+                coarse_count,
+                mass,
+                px,
+                py,
+                energy,
+            } => {
+                self.out.write_all(&[7u8])?;
+                self.out.write_all(&tick.to_le_bytes())?;
+                self.out.write_all(&fine_count.to_le_bytes())?;
+                self.out.write_all(&coarse_count.to_le_bytes())?;
+                self.out.write_all(&mass.to_le_bytes())?;
+                self.out.write_all(&px.to_le_bytes())?;
+                self.out.write_all(&py.to_le_bytes())?;
+                self.out.write_all(&energy.to_le_bytes())
             }
         }
     }
@@ -147,7 +222,8 @@ impl PartialEq for ParseError {
 pub struct StreamReader<R: Read> {
     input: R,
     header: Option<(u32, u32)>,
-    scratch: [u8; 33],
+    body_count: Option<u32>,
+    scratch: [u8; 56],
 }
 
 impl<R: Read> StreamReader<R> {
@@ -158,20 +234,31 @@ impl<R: Read> StreamReader<R> {
             return Err(ParseError::BadMagic);
         }
         let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        if version != FORMAT_VERSION {
+        if version != FORMAT_VERSION && version != FORMAT_VERSION_GRAVITY {
             return Err(ParseError::BadVersion(version));
         }
         let world_w = u32::from_le_bytes(buf[8..12].try_into().unwrap());
         let world_h = u32::from_le_bytes(buf[12..16].try_into().unwrap());
+        let mut body_count = None;
+        if version == FORMAT_VERSION_GRAVITY {
+            let mut bc = [0u8; 4];
+            read_exact(&mut input, &mut bc)?;
+            body_count = Some(u32::from_le_bytes(bc));
+        }
         Ok(StreamReader {
             input,
             header: Some((world_w, world_h)),
-            scratch: [0u8; 33],
+            body_count,
+            scratch: [0u8; 56],
         })
     }
 
     pub fn header(&self) -> (u32, u32) {
         self.header.expect("header consumed in new")
+    }
+
+    pub fn body_count(&self) -> Option<u32> {
+        self.body_count
     }
 
     pub fn next_record(&mut self) -> Result<Option<Record>, ParseError> {
@@ -227,6 +314,36 @@ impl<R: Read> StreamReader<R> {
                     level,
                     population: u64::from_le_bytes(self.scratch[17..25].try_into().unwrap()),
                     hash: u64::from_le_bytes(self.scratch[25..33].try_into().unwrap()),
+                }
+            }
+            6 => {
+                self.take(54)?;
+                let level = self.scratch[13];
+                if level > 1 {
+                    return Err(ParseError::BadLevel(level));
+                }
+                Record::BodyState {
+                    tick: u64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
+                    body_id: u32::from_le_bytes(self.scratch[8..12].try_into().unwrap()),
+                    region: self.scratch[12],
+                    level,
+                    x: f64::from_le_bytes(self.scratch[14..22].try_into().unwrap()),
+                    y: f64::from_le_bytes(self.scratch[22..30].try_into().unwrap()),
+                    vx: f64::from_le_bytes(self.scratch[30..38].try_into().unwrap()),
+                    vy: f64::from_le_bytes(self.scratch[38..46].try_into().unwrap()),
+                    mass: f64::from_le_bytes(self.scratch[46..54].try_into().unwrap()),
+                }
+            }
+            7 => {
+                self.take(56)?;
+                Record::TotalsState {
+                    tick: u64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
+                    fine_count: u64::from_le_bytes(self.scratch[8..16].try_into().unwrap()),
+                    coarse_count: u64::from_le_bytes(self.scratch[16..24].try_into().unwrap()),
+                    mass: f64::from_le_bytes(self.scratch[24..32].try_into().unwrap()),
+                    px: f64::from_le_bytes(self.scratch[32..40].try_into().unwrap()),
+                    py: f64::from_le_bytes(self.scratch[40..48].try_into().unwrap()),
+                    energy: f64::from_le_bytes(self.scratch[48..56].try_into().unwrap()),
                 }
             }
             t => return Err(ParseError::UnknownTag(t)),

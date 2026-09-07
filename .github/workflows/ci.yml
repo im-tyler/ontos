@@ -56,3 +56,7 @@ jobs:
           verify 200 7 --demote 1 0 --demote 0 1 --promote 1 0
           verify 300 123456789 --promote 1 1 --demote 1 1 --promote 1 1
           verify 1 0
+          verify 100 42 --mode gravity --bodies 8
+          verify 120 42 --mode gravity --bodies 8 --demote-at 20 0 0 --promote-at 80 0 0
+          verify 150 3 --mode gravity --bodies 10 --demote-at 10 0 1 --demote-at 40 2 0 --promote-at 100 0 1
+          verify 120 7 --mode gravity --bodies 12 --demote-at 5 1 1
