@@ -113,16 +113,23 @@ Header (not a record):
 Records, each a u8 tag followed by its payload:
 - tag 1 TickHeader: u64 tick
 - tag 2 Snapshot: u64 population (total across regions, live units)
-- tag 3 CellFlipped: u64 tick, u32 x, u32 y (reserved; CLI does not emit)
+- tag 3 CellFlipped: u64 tick, u32 x, u32 y (reserved: verifiers must parse
+  and skip it; no state semantics are defined in version 1. The reference
+  CLI does not emit it)
 - tag 4 RegionLevel: u32 region_x, u32 region_y, u8 level (0 coarse, 1 fine)
 - tag 5 RegionState: u64 tick, u32 region_x, u32 region_y, u8 level,
-     u64 population, u64 region hash
+     u64 population, u64 region hash. The tick field repeats the TickHeader
+     tick of the tick it belongs to; verifiers treat it as report-only in
+     version 1 (the TickHeader is authoritative)
 
 Emission contract of the reference CLI (`ontos`):
-- Header, then one RegionLevel record per requested level change, then for
-  each tick: TickHeader, Snapshot, and RegionState for regions (0,0),
-  (1,0), (0,1), (1,1) in that order. Level changes apply before the first
-  tick.
+- Header, then one RegionLevel record per requested level change (in
+  application order: all demotes, then all promotes), then for each tick:
+  TickHeader, Snapshot, and RegionState for regions (0,0), (1,0), (0,1),
+  (1,1) in that order. Level changes apply before the first tick.
+- The format itself permits RegionLevel records at any point in the stream;
+  they take effect when encountered, before the next tick. Verifiers apply
+  them on encounter.
 
 ## 10. Verification procedure
 

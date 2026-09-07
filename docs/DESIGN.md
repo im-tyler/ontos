@@ -78,17 +78,21 @@ The physics engine is not a dependency of this project. It is the product.
 
 ## Phases
 
-- **Phase 0 — spine:** chunked hierarchical state, fixed-dt tick, record
-  stream, determinism proven (two runs bit-identical). Two resolution levels
-  with totals conserved across the seam.
-- **Phase 1 — oracle wiring:** simval adapter + independent reference
-  implementation of Phase 0 rules. Divergence = bug found before physics
-  exists.
+- **Phase 0 — spine:** DONE 2026-09-06. Chunked hierarchical state, fixed-dt
+  tick, record stream, determinism proven (CI replays bit-identical across
+  macOS arm64 + Linux x86_64 against a committed golden corpus). Two
+  resolution levels with totals conserved across the seam.
+- **Phase 1 — oracle wiring:** DONE 2026-09-06. simval adapter + independent
+  reference implementation of Phase 0 rules; both CIs cross-verify on every
+  push. A third independent implementation (C++ stream dump, in light-system
+  `tools/ontos/`) agrees bit-for-bit. Stream spec v1 frozen: changes require
+  a version bump and a coordinated simval update.
 - **Phase 2 — gravity epoch:** Chebyshev ephemeris far, integrator near,
   invisible-zoom handoff. simval verifies against REBOUND.
 - **Phase 3 — viewer:** light-system consumes the stream (draws); contact
   events drive modal synthesis into an audio callback on its own thread.
-  Can pull earlier once the stream format stabilizes.
+  The C++ stream parser spike already lives in light-system `tools/ontos/`;
+  the viewer itself waits for Phase 2's radiance/pressure fields.
 - **Phase 4 — reconstruction:** fine-detail synthesis under coarse
   constraints. Timeboxed experiments; simval bounds the error. Gate: Phase
   2's seam must be boring first.

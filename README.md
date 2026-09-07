@@ -22,8 +22,19 @@ simval ── verifies ──► ONTO ── state stream ──► light-system
 
 ## Status
 
-Scaffold. Phase 0 in progress: deterministic single-resolution game of life,
-bit-identical replay from identical seeds. See [docs/DESIGN.md](docs/DESIGN.md).
+Phase 0 closed and Phase 1 (oracle wiring) done, both simval-verified:
+
+- Deterministic spine, promote/demote with population conservation, FNV
+  state hashes, normative stream spec (version 1).
+- Verified by three independent implementations of `docs/STREAM_SPEC.md`:
+  the Rust sim, simval's Python reference (`python3 -m simval.ontos`),
+  and a C++ spike (`light-system` `tools/ontos/ontos_stream_dump.cpp`).
+  All three agree bit-for-bit.
+- CI proves bit-identical replay across macOS arm64 and Linux x86_64
+  against a committed golden-stream corpus, and cross-verifies freshly
+  generated streams with the simval oracle on every push.
+
+Next: Phase 2, the gravity epoch — see [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Determinism contract
 
@@ -37,3 +48,7 @@ bit-identical replay from identical seeds. See [docs/DESIGN.md](docs/DESIGN.md).
 ```
 cargo test
 ```
+
+Golden-stream regression corpus lives in `core/tests/golden/`; the CLI is
+`cargo run --bin ontos -- --ticks N --seed S [--demote RX RY] [--promote RX RY]
+[--out FILE]`.
