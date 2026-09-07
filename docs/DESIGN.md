@@ -87,8 +87,11 @@ The physics engine is not a dependency of this project. It is the product.
   push. A third independent implementation (C++ stream dump, in light-system
   `tools/ontos/`) agrees bit-for-bit. Stream spec v1 frozen: changes require
   a version bump and a coordinated simval update.
-- **Phase 2 — gravity epoch:** Chebyshev ephemeris far, integrator near,
-  invisible-zoom handoff. simval verifies against REBOUND.
+- **Phase 2 — gravity epoch:** core mechanics DONE 2026-09-06 (spec v2:
+  leapfrog + momentum ledger, Chebyshev ephemeris windows with automatic
+  re-fits, one-sided seam forces with bounded drift; bit-verified by three
+  implementations, drift-checked by simval). Remaining: REBOUND anchoring,
+  zoom policy (who promotes/demotes, when), performance.
 - **Phase 3 — viewer:** light-system consumes the stream (draws); contact
   events drive modal synthesis into an audio callback on its own thread.
   The C++ stream parser spike already lives in light-system `tools/ontos/`;

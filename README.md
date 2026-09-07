@@ -22,19 +22,28 @@ simval ── verifies ──► ONTO ── state stream ──► light-system
 
 ## Status
 
-Phase 0 closed and Phase 1 (oracle wiring) done, both simval-verified:
+Phase 0 and Phase 1 closed; Phase 2 (gravity epoch) core mechanics landed,
+all simval-verified:
 
 - Deterministic spine, promote/demote with population conservation, FNV
-  state hashes, normative stream spec (version 1).
+  state hashes, normative stream spec (version 1 = life, version 2 =
+  gravity).
+- Gravity epoch: leapfrog with exact-pair momentum ledger, Plummer-softened
+  2D gravity, Chebyshev degree-8 ephemeris windows for demoted regions
+  (W=32, least-squares fits in the deterministic op closure +,-,*,/,sqrt),
+  automatic window re-fits, one-sided fine<-coarse forces with bounded
+  ledger drift.
 - Verified by three independent implementations of `docs/STREAM_SPEC.md`:
-  the Rust sim, simval's Python reference (`python3 -m simval.ontos`),
-  and a C++ spike (`light-system` `tools/ontos/ontos_stream_dump.cpp`).
-  All three agree bit-for-bit.
+  the Rust sim, simval's Python reference (`python3 -m simval.ontos`), and
+  a C++ spike (`light-system` `tools/ontos/ontos_stream_dump.cpp`). All
+  three agree bit-for-bit on both versions, including windowed runs.
 - CI proves bit-identical replay across macOS arm64 and Linux x86_64
-  against a committed golden-stream corpus, and cross-verifies freshly
-  generated streams with the simval oracle on every push.
+  against committed golden-stream corpora (life + gravity), and
+  cross-verifies freshly generated streams with the simval oracle on every
+  push.
 
-Next: Phase 2, the gravity epoch — see [docs/DESIGN.md](docs/DESIGN.md).
+Phase 2 remaining: REBOUND anchoring for the far field, zoom policy.
+Next: see [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Determinism contract
 
