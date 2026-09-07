@@ -152,7 +152,9 @@ impl World {
         let ry = fy / REGION_FINE;
         let region = &self.regions[Self::region_index(rx, ry)];
         match region.level {
-            Level::Fine => region.cells[((fy % REGION_FINE) * REGION_FINE + (fx % REGION_FINE)) as usize],
+            Level::Fine => {
+                region.cells[((fy % REGION_FINE) * REGION_FINE + (fx % REGION_FINE)) as usize]
+            }
             Level::Coarse => {
                 let cx = (fx % REGION_FINE) / COARSE_FACTOR;
                 let cy = (fy % REGION_FINE) / COARSE_FACTOR;
