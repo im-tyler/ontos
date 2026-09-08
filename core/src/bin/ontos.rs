@@ -45,6 +45,7 @@ fn main() {
     let mut friction: Option<f64> = None;
     let mut walls = false;
     let mut wav: Option<PathBuf> = None;
+    let mut test_ic: Option<String> = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -106,6 +107,15 @@ fn main() {
                 wav = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
+            "--test-ic" => {
+                let profile = args[i + 1].clone();
+                match profile.as_str() {
+                    "wallshot" | "coarsehit" => {}
+                    other => panic!("unknown test ic profile {other}"),
+                }
+                test_ic = Some(profile);
+                i += 2;
+            }
             "--demote" => {
                 let rx: u32 = parse_region(&args[i + 1]);
                 let ry: u32 = parse_region(&args[i + 2]);
@@ -156,7 +166,8 @@ fn main() {
                      life:    [--demote RX RY] [--promote RX RY]...\n\
                      gravity: [--demote-at T RX RY] [--promote-at T RX RY] [--collapse-at T RX RY]\n\
                               [--expand-at T RX RY] [--observer OFFSET] [--contacts] [--radial]\n\
-                              [--restitution E] [--friction F] [--walls] [--wav FILE]..."
+                              [--restitution E] [--friction F] [--walls] [--wav FILE]\n\
+                              [--test-ic wallshot|coarsehit] (test-only corpus initial conditions)..."
                 );
                 std::process::exit(1);
             }
@@ -168,7 +179,13 @@ fn main() {
     }
 
     match mode {
-        Mode::Life => run_life(ticks, seed, out, demote, promote),
+        Mode::Life => {
+            if test_ic.is_some() {
+                eprintln!("--test-ic requires --mode gravity");
+                std::process::exit(1);
+            }
+            run_life(ticks, seed, out, demote, promote)
+        }
         Mode::Gravity => run_gravity(
             ticks,
             seed,
@@ -182,6 +199,7 @@ fn main() {
             friction.unwrap_or(0.0),
             walls,
             wav,
+            test_ic,
         ),
     }
 }
@@ -280,10 +298,14 @@ fn run_gravity(
     friction: f64,
     walls: bool,
     wav: Option<PathBuf>,
+    test_ic: Option<String>,
 ) {
     events.sort();
     events.dedup();
-    let mut world = GravityWorld::new(seed, bodies);
+    let mut world = match &test_ic {
+        Some(profile) => GravityWorld::corpus_world(profile, seed, bodies),
+        None => GravityWorld::new(seed, bodies),
+    };
     world.contacts = contacts;
     world.radial = radial;
     let params = restitution != 0.0 || friction != 0.0 || walls;
@@ -459,6 +481,9 @@ fn run_gravity(
             std::fs::write(path, audio::wav_bytes(&pcm)).expect("failed to write wav");
         }
         line.push_str(&format!(" audio={:016x}", audio::pcm_hash(&pcm)));
+    }
+    if let Some(profile) = &test_ic {
+        line.push_str(&format!(" ic={profile}"));
     }
     println!("{line}");
 }

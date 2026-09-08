@@ -38,6 +38,12 @@ jobs:
           cargo run -q --release --bin ontos -- --mode gravity --contacts --restitution 0.5 --friction 0.25 --ticks 400 --seed 11 --bodies 32 --out /tmp/g_restitution.stream --wav /tmp/g_restitution.wav
           cmp /tmp/g_restitution.stream core/tests/golden/g_restitution.stream
           cmp /tmp/g_restitution.wav core/tests/golden/g_restitution.wav
+          cargo run -q --release --bin ontos -- --mode gravity --contacts --walls --restitution 0.7 --friction 0.3 --ticks 800 --seed 3 --bodies 16 --test-ic wallshot --out /tmp/g_wallshot.stream --wav /tmp/g_wallshot.wav
+          cmp /tmp/g_wallshot.stream core/tests/golden/g_wallshot.stream
+          cmp /tmp/g_wallshot.wav core/tests/golden/g_wallshot.wav
+          cargo run -q --release --bin ontos -- --mode gravity --contacts --restitution 0.5 --friction 0.25 --demote-at 1 1 1 --ticks 500 --seed 11 --bodies 8 --test-ic coarsehit --out /tmp/g_coarsehit.stream --wav /tmp/g_coarsehit.wav
+          cmp /tmp/g_coarsehit.stream core/tests/golden/g_coarsehit.stream
+          cmp /tmp/g_coarsehit.wav core/tests/golden/g_coarsehit.wav
           echo "bit-identical on ${{ matrix.os }}"
 
   cross-verify:
@@ -60,6 +66,11 @@ jobs:
           verify() {
             ./target/release/ontos --ticks "$1" --seed "$2" "${@:3}" --out /tmp/case.stream
             PYTHONPATH=simval/src python3 -m simval.ontos /tmp/case.stream "$2"
+          }
+          verify_ic() {
+            ic="$1"; t="$2"; s="$3"; shift 3
+            ./target/release/ontos --ticks "$t" --seed "$s" "$@" --test-ic "$ic" --out /tmp/case.stream
+            PYTHONPATH=simval/src python3 -m simval.ontos /tmp/case.stream "$s" --test-ic "$ic"
           }
           verify 64 42
           verify 64 42 --demote 1 0
@@ -85,6 +96,8 @@ jobs:
           verify 600 22 --mode gravity --bodies 24 --contacts --walls --collapse-at 5 0 1 --expand-at 200 0 1 --collapse-at 260 0 1
           verify 400 11 --mode gravity --bodies 32 --contacts --restitution 0.5 --friction 0.25
           verify 300 13 --mode gravity --bodies 16 --contacts --walls --restitution 0.8 --friction 0.1
+          verify_ic wallshot 800 3 --mode gravity --contacts --walls --restitution 0.7 --friction 0.3 --bodies 16
+          verify_ic coarsehit 500 11 --mode gravity --contacts --restitution 0.5 --friction 0.25 --demote-at 1 1 1 --bodies 8
       - name: Cross-check modal audio with the Python reference (spec section 22)
         run: |
           set -e
@@ -98,3 +111,8 @@ jobs:
           HASH=$(echo "$LINE" | grep -o 'audio=[0-9a-f]*' | cut -d= -f2)
           PYTHONPATH=simval/src python3 -m simval.ontos_audio /tmp/walls.stream --wav /tmp/ref_walls.wav --expect "$HASH"
           cmp /tmp/walls.wav /tmp/ref_walls.wav
+          LINE=$(./target/release/ontos --mode gravity --contacts --walls --restitution 0.7 --friction 0.3 --ticks 800 --seed 3 --bodies 16 --test-ic wallshot --out /tmp/wallshot.stream --wav /tmp/wallshot.wav)
+          echo "$LINE"
+          HASH=$(echo "$LINE" | grep -o 'audio=[0-9a-f]*' | cut -d= -f2)
+          PYTHONPATH=simval/src python3 -m simval.ontos_audio /tmp/wallshot.stream --wav /tmp/ref_wallshot.wav --expect "$HASH"
+          cmp /tmp/wallshot.wav /tmp/ref_wallshot.wav

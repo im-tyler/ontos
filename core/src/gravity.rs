@@ -219,6 +219,81 @@ pub fn initial_conditions(seed: u64, count: u32) -> Vec<Body> {
     bodies
 }
 
+// Test-only initial-condition profiles for corpus generation (see
+// docs/DESIGN.md "corpus coverage"). Not part of the stream spec: a
+// stream produced from these ICs verifies only when the verifier
+// reconstructs the same profile (Rust corpus_world / simval
+// --test-ic / ontos_stream_dump --test-ic). Each body consumes the same
+// five SplitMix64 draws as initial_conditions, so masses match the spec
+// ICs of the same seed.
+//
+// wallshot: body i targets wall i % 4 (x=0, x=128, y=0, y=128) — it
+// starts within ~2 units of the wall, inbound at 2..5, so wall-hit
+// Contact records fire within a few hundred ticks.
+// coarsehit (count 8): bodies 0..3 are interceptors outside the
+// region-3 box aimed straight at the cluster at 56..72; bodies 4..7
+// are a slow target cluster around (86, 89) spread over y lanes
+// 77 + 8*lane. Interceptors carry the smaller ids on purpose: the
+// section 21/24 sweep is lexicographic with the fine body as the
+// outer index, so a fine x ephemeris-coarse static pair only ever
+// fires as (fine i, coarse j) with i < j. Same-lane |dy| <= 2 < min
+// contact radius guarantees each interceptor a static contact once
+// region 3 is demoted early; the 9-unit lane spacing keeps
+// interceptors from contacting each other.
+#[doc(hidden)]
+pub fn corpus_initial_conditions(profile: &str, seed: u64, count: u32) -> Vec<Body> {
+    let mut rng = SplitMix64::new(seed);
+    let mut bodies = Vec::with_capacity(count as usize);
+    for id in 0..count {
+        let u0 = rng.draw();
+        let u1 = rng.draw();
+        let u2 = rng.draw();
+        let u3 = rng.draw();
+        let u4 = rng.draw();
+        let mass = 0.5 + (u0 as f64) * 2.0f64.powi(-64) * 2.0;
+        let along = 16.0 + (u1 as f64) * 2.0f64.powi(-64) * 96.0;
+        let off = (u2 as f64) * 2.0f64.powi(-64) * 2.0;
+        let speed = 2.0 + (u3 as f64) * 2.0f64.powi(-64) * 3.0;
+        let drift = ((u4 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5;
+        let (x, y, vx, vy) = match profile {
+            "wallshot" => match id % 4 {
+                0 => (2.0 + off, along, 0.0 - speed, drift),
+                1 => (124.0 + off, along, speed, drift),
+                2 => (along, 2.0 + off, drift, 0.0 - speed),
+                _ => (along, 124.0 + off, drift, speed),
+            },
+            "coarsehit" => {
+                let lane = 77.0 + 8.0 * ((id % 4) as f64) + (u2 as f64) * 2.0f64.powi(-64) * 2.0;
+                if id < 4 {
+                    (
+                        56.0 + (u1 as f64) * 2.0f64.powi(-64) * 4.0,
+                        lane,
+                        56.0 + (u3 as f64) * 2.0f64.powi(-64) * 16.0,
+                        ((u4 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5,
+                    )
+                } else {
+                    (
+                        84.0 + (u1 as f64) * 2.0f64.powi(-64) * 4.0,
+                        lane,
+                        ((u3 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5,
+                        ((u4 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5,
+                    )
+                }
+            }
+            other => panic!("unknown corpus profile {other}"),
+        };
+        bodies.push(Body {
+            id,
+            mass,
+            x,
+            y,
+            vx,
+            vy,
+        });
+    }
+    bodies
+}
+
 pub fn region_at(x: f64, y: f64) -> u8 {
     if x < 0.0 || x >= 128.0 || y < 0.0 || y >= 128.0 {
         return UNMANAGED;
@@ -230,7 +305,17 @@ pub fn region_at(x: f64, y: f64) -> u8 {
 
 impl GravityWorld {
     pub fn new(seed: u64, count: u32) -> Self {
-        let bodies = initial_conditions(seed, count);
+        Self::from_bodies(seed, initial_conditions(seed, count))
+    }
+
+    // Test-only corpus constructor (see corpus_initial_conditions).
+    #[doc(hidden)]
+    pub fn corpus_world(profile: &str, seed: u64, count: u32) -> Self {
+        Self::from_bodies(seed, corpus_initial_conditions(profile, seed, count))
+    }
+
+    fn from_bodies(seed: u64, bodies: Vec<Body>) -> Self {
+        let count = bodies.len() as u32;
         let mut px = 0.0f64;
         let mut py = 0.0f64;
         for b in &bodies {
@@ -1045,13 +1130,17 @@ impl GravityWorld {
                     (jn, mu)
                 } else {
                     let (_, jn) = self.static_impulse(i, nx, ny, vrx, vry);
-                    (jn, mi)
+                    (jn, (mi * mj) / (mi + mj))
                 };
                 if self.touching.contains(&pair) {
                     continue;
                 }
-                let vn_after = (self.bodies[j].vx - self.bodies[i].vx) * nx
-                    + (self.bodies[j].vy - self.bodies[i].vy) * ny;
+                let (jvx, jvy) = if kind[j] == 0 {
+                    (self.bodies[j].vx, self.bodies[j].vy)
+                } else {
+                    (sj.vx, sj.vy)
+                };
+                let vn_after = (jvx - self.bodies[i].vx) * nx + (jvy - self.bodies[i].vy) * ny;
                 events.push(ContactEvent {
                     tick: entering,
                     a: i as u32,
@@ -2201,5 +2290,87 @@ mod tests {
             dx * dx + dy * dy < (big_r + r0) * (big_r + r0),
             "still inside the disk"
         );
+    }
+
+    #[test]
+    fn wallshot_corpus_hits_all_four_walls() {
+        let mut w = GravityWorld::corpus_world("wallshot", 3, 16);
+        w.contacts = true;
+        w.contact_params = true;
+        w.walls = true;
+        w.restitution = 0.7;
+        w.friction = 0.3;
+        let mut per_wall = [0usize; 4];
+        let mut worst = 0.0f64;
+        for _ in 0..800 {
+            w.step();
+            for c in &w.last_contacts {
+                assert!(c.jn > 0.0);
+                let wall = (c.b - WALL_BASE) as usize;
+                assert!(
+                    wall < 4,
+                    "wallshot corpus must stay wall-only, got {:08x}",
+                    c.b
+                );
+                per_wall[wall] += 1;
+                let expect = 0.0 - c.vn * 0.7;
+                worst = worst.max((c.vn_after - expect).abs());
+            }
+            w.last_contacts.clear();
+        }
+        assert!(
+            per_wall.iter().all(|&n| n >= 3),
+            "per-wall hits {per_wall:?}"
+        );
+        assert!(worst < 1e-12, "worst |vn_after + e*vn| {worst}");
+    }
+
+    #[test]
+    fn coarsehit_corpus_lands_static_contacts() {
+        let mut w = GravityWorld::corpus_world("coarsehit", 11, 8);
+        w.contacts = true;
+        w.contact_params = true;
+        w.restitution = 0.5;
+        w.friction = 0.25;
+        w.schedule(1, 3, Action::Demote);
+        let mut statics = 0usize;
+        for _ in 0..500 {
+            w.step();
+            for c in &w.last_contacts {
+                assert!(c.jn > 0.0);
+                let j = c.b as usize;
+                if j < w.bodies.len() && w.coarse[j].is_some() {
+                    statics += 1;
+                    let expect = 0.0 - c.vn * 0.5;
+                    assert!(
+                        (c.vn_after - expect).abs() < 1e-12,
+                        "static bounce closes on -e*vn"
+                    );
+                }
+            }
+            w.last_contacts.clear();
+        }
+        assert!(
+            statics >= 4,
+            "expected fine x coarse static contacts, got {statics}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown corpus profile")]
+    fn corpus_profile_unknown_rejected() {
+        let _ = GravityWorld::corpus_world("nonsense", 1, 4);
+    }
+
+    #[test]
+    fn corpus_profile_masses_match_spec_ics() {
+        let spec = initial_conditions(5, 6);
+        for profile in ["wallshot", "coarsehit"] {
+            let corpus = corpus_initial_conditions(profile, 5, 6);
+            for (a, b) in spec.iter().zip(corpus.iter()) {
+                assert_eq!(a.id, b.id);
+                assert_eq!(a.mass.to_bits(), b.mass.to_bits());
+            }
+        }
     }
 }

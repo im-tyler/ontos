@@ -131,11 +131,25 @@ The physics engine is not a dependency of this project. It is the product.
   measured: all-fine runs keep the ledger bit-exact for any e and
   friction). Static contactants ride Contact records as pseudo body
   ids (monopoles 0xFF000000+region, walls 0xFFFFFF00+wall) and feed
-  the section 22 audio with their own reduced-mass rule. Open:
-  spatialized/realtime audio, wall-hit corpora at wall-reachable
-  timescales (spec initial conditions keep bodies >= 32 from the
-  walls; wall physics is unit-tested in ontos and simval and the
-  no-hit corpus pins the format).
+  the section 22 audio with their own reduced-mass rule. Corpus
+  coverage DONE 2026-09-08: wall-hit and fine x ephemeris-coarse
+  contacts are geometrically unreachable under spec initial conditions
+  (bodies start >= 32 from every wall at |v| <= 0.25, so a first wall
+  hit needs ~120k ticks and coarse clusters sit mid-world), so a
+  test-only corpus constructor closes the gap without touching the
+  spec: GravityWorld::corpus_world / corpus_initial_conditions
+  (doc-hidden; CLI --test-ic) derives near-wall inbound bodies
+  (wallshot) and lane-aimed interceptors against an early-demoted
+  coarse cluster (coarsehit) from the same five SplitMix64 draws per
+  body as the spec ICs — masses match the spec ICs of the same seed,
+  positions and velocities do not. The streams carry no profile
+  marker: verification requires passing the same profile (simval
+  --test-ic, ontos_stream_dump --test-ic). Goldens g_wallshot (16
+  wall-hit records, 4 per wall, e=0.7 friction=0.3) and g_coarsehit
+  (4 fine x coarse static contacts vs a demoted region, e=0.5
+  friction=0.25) execute the wall and static branches in all three
+  implementations, WAV hashes included. Open: spatialized/realtime
+  audio.
 - **Phase 4 — reconstruction:** v1 experiment DONE 2026-09-07 (spec
   section 19: collapse to totals-only monopole + deterministic
   reconstruction on expansion with exact momentum residual). v2 DONE

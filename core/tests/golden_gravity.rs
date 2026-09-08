@@ -9,10 +9,10 @@ fn verify_golden_gravity(name: &str, seed: u64) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
         .join(name);
-    verify_golden_gravity_at(&path, seed, None);
+    verify_golden_gravity_at(&path, seed, None, None);
 }
 
-fn verify_golden_gravity_at(path: &Path, seed: u64, wav: Option<&Path>) {
+fn verify_golden_gravity_at(path: &Path, seed: u64, profile: Option<&str>, wav: Option<&Path>) {
     let name = path.file_name().unwrap().to_string_lossy();
     let input = File::open(path).expect("golden stream missing");
     let mut reader = StreamReader::new(input).expect("bad golden header");
@@ -20,7 +20,10 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, wav: Option<&Path>) {
         .body_count()
         .expect("gravity stream must carry body_count");
 
-    let mut world = GravityWorld::new(seed, body_count);
+    let mut world = match profile {
+        Some(p) => GravityWorld::corpus_world(p, seed, body_count),
+        None => GravityWorld::new(seed, body_count),
+    };
     let mut pending: Vec<(u8, Action)> = Vec::new();
     let mut collapse_records: Vec<Record> = Vec::new();
     let mut multipole_records: Vec<Record> = Vec::new();
@@ -400,6 +403,7 @@ fn golden_gravity_walls() {
     verify_golden_gravity_at(
         &root.join("g_walls.stream"),
         22,
+        None,
         Some(&root.join("g_walls.wav")),
     );
 }
@@ -410,6 +414,7 @@ fn golden_gravity_restitution() {
     verify_golden_gravity_at(
         &root.join("g_restitution.stream"),
         11,
+        None,
         Some(&root.join("g_restitution.wav")),
     );
 }
@@ -420,6 +425,29 @@ fn golden_gravity_contact() {
     verify_golden_gravity_at(
         &root.join("g_contact.stream"),
         11,
+        None,
         Some(&root.join("g_contact.wav")),
+    );
+}
+
+#[test]
+fn golden_gravity_wallshot() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    verify_golden_gravity_at(
+        &root.join("g_wallshot.stream"),
+        3,
+        Some("wallshot"),
+        Some(&root.join("g_wallshot.wav")),
+    );
+}
+
+#[test]
+fn golden_gravity_coarsehit() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    verify_golden_gravity_at(
+        &root.join("g_coarsehit.stream"),
+        11,
+        Some("coarsehit"),
+        Some(&root.join("g_coarsehit.wav")),
     );
 }
