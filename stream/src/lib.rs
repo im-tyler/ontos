@@ -66,6 +66,16 @@ pub enum Record {
         py: f64,
         energy: f64,
     },
+    RegionMultipole {
+        tick: u64,
+        region_x: u32,
+        region_y: u32,
+        mx: f64,
+        my: f64,
+        qxx: f64,
+        qxy: f64,
+        qyy: f64,
+    },
 }
 
 pub struct StreamWriter<W: Write> {
@@ -201,6 +211,26 @@ impl<W: Write> StreamWriter<W> {
                 self.out.write_all(&px.to_le_bytes())?;
                 self.out.write_all(&py.to_le_bytes())?;
                 self.out.write_all(&energy.to_le_bytes())
+            }
+            Record::RegionMultipole {
+                tick,
+                region_x,
+                region_y,
+                mx,
+                my,
+                qxx,
+                qxy,
+                qyy,
+            } => {
+                self.out.write_all(&[9u8])?;
+                self.out.write_all(&tick.to_le_bytes())?;
+                self.out.write_all(&region_x.to_le_bytes())?;
+                self.out.write_all(&region_y.to_le_bytes())?;
+                self.out.write_all(&mx.to_le_bytes())?;
+                self.out.write_all(&my.to_le_bytes())?;
+                self.out.write_all(&qxx.to_le_bytes())?;
+                self.out.write_all(&qxy.to_le_bytes())?;
+                self.out.write_all(&qyy.to_le_bytes())
             }
         }
     }
@@ -403,6 +433,19 @@ impl<R: Read> StreamReader<R> {
                     px: f64::from_le_bytes(self.scratch[48..56].try_into().unwrap()),
                     py: f64::from_le_bytes(self.scratch[56..64].try_into().unwrap()),
                     energy: f64::from_le_bytes(self.scratch[64..72].try_into().unwrap()),
+                }
+            }
+            9 => {
+                self.take(56)?;
+                Record::RegionMultipole {
+                    tick: u64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
+                    region_x: u32::from_le_bytes(self.scratch[8..12].try_into().unwrap()),
+                    region_y: u32::from_le_bytes(self.scratch[12..16].try_into().unwrap()),
+                    mx: f64::from_le_bytes(self.scratch[16..24].try_into().unwrap()),
+                    my: f64::from_le_bytes(self.scratch[24..32].try_into().unwrap()),
+                    qxx: f64::from_le_bytes(self.scratch[32..40].try_into().unwrap()),
+                    qxy: f64::from_le_bytes(self.scratch[40..48].try_into().unwrap()),
+                    qyy: f64::from_le_bytes(self.scratch[48..56].try_into().unwrap()),
                 }
             }
             t => return Err(ParseError::UnknownTag(t)),
@@ -724,5 +767,31 @@ mod tests {
                 .unwrap_err(),
             ParseError::BadLevel(3)
         );
+    }
+
+    #[test]
+    fn region_multipole_roundtrip_gravity() {
+        let mut buf = Vec::new();
+        let rec = Record::RegionMultipole {
+            tick: 30,
+            region_x: 1,
+            region_y: 1,
+            mx: 512.5,
+            my: -64.25,
+            qxx: 1.5e3,
+            qxy: -2.25,
+            qyy: 9.75e2,
+        };
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 10).unwrap();
+            w.write(&rec).unwrap();
+            w.flush().unwrap();
+        }
+        assert_eq!(buf[20], 9);
+        assert_eq!(buf.len(), 21 + 56);
+        let mut r = StreamReader::new(&buf[..]).unwrap();
+        assert_eq!(r.body_count(), Some(10));
+        assert_eq!(r.next_record().unwrap(), Some(rec));
+        assert_eq!(r.next_record().unwrap(), None);
     }
 }

@@ -17,6 +17,8 @@ fn verify_golden_gravity(name: &str, seed: u64) {
     let mut world = GravityWorld::new(seed, body_count);
     let mut pending: Vec<(u8, Action)> = Vec::new();
     let mut collapse_records: Vec<Record> = Vec::new();
+    let mut multipole_records: Vec<Record> = Vec::new();
+    let mut pending_multipole = false;
     let mut body_index = 0usize;
     let mut last_tick = 0u64;
 
@@ -24,6 +26,8 @@ fn verify_golden_gravity(name: &str, seed: u64) {
         match record {
             Record::Header { .. } => panic!("header record mid-stream"),
             Record::TickHeader { tick } => {
+                world.multipole = pending_multipole;
+                pending_multipole = false;
                 for &(region, action) in &pending {
                     world.schedule(world.tick + 1, region, action);
                 }
@@ -70,6 +74,30 @@ fn verify_golden_gravity(name: &str, seed: u64) {
                         );
                     }
                 }
+                for rec in multipole_records.drain(..) {
+                    if let Record::RegionMultipole {
+                        tick,
+                        region_x,
+                        region_y,
+                        mx,
+                        my,
+                        qxx,
+                        qxy,
+                        qyy,
+                    } = rec
+                    {
+                        assert_eq!(tick, world.tick, "{name}: RegionMultipole tick");
+                        let region = (region_y * 2 + region_x) as u8;
+                        let tot = world
+                            .collapsed_totals(region)
+                            .expect("{name}: region multipole at record");
+                        assert_eq!(mx.to_bits(), tot.mx.to_bits(), "{name}: multipole mx");
+                        assert_eq!(my.to_bits(), tot.my.to_bits(), "{name}: multipole my");
+                        assert_eq!(qxx.to_bits(), tot.qxx.to_bits(), "{name}: multipole qxx");
+                        assert_eq!(qxy.to_bits(), tot.qxy.to_bits(), "{name}: multipole qxy");
+                        assert_eq!(qyy.to_bits(), tot.qyy.to_bits(), "{name}: multipole qyy");
+                    }
+                }
                 body_index = 0;
                 last_tick = tick;
             }
@@ -94,6 +122,10 @@ fn verify_golden_gravity(name: &str, seed: u64) {
                 pending.push(((region_y * 2 + region_x) as u8, action));
             }
             Record::RegionCollapsed { .. } => collapse_records.push(record),
+            Record::RegionMultipole { .. } => {
+                multipole_records.push(record);
+                pending_multipole = true;
+            }
             Record::RegionState {
                 tick,
                 region_x,
@@ -224,4 +256,9 @@ fn golden_gravity_collapse() {
 #[test]
 fn golden_gravity_collapse_observer() {
     verify_golden_gravity("g_collapse_observer.stream", 13);
+}
+
+#[test]
+fn golden_gravity_multipole() {
+    verify_golden_gravity("g_multipole.stream", 17);
 }

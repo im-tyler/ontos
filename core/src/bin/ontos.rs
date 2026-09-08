@@ -10,6 +10,16 @@ enum Mode {
     Gravity,
 }
 
+fn parse_region(raw: &str) -> u32 {
+    let v: u32 = raw
+        .parse()
+        .unwrap_or_else(|_| panic!("invalid region {raw}"));
+    if v > 1 {
+        panic!("region coordinate out of range: {v}");
+    }
+    v
+}
+
 fn level_byte(action: Action) -> u8 {
     match action {
         Action::Demote => 0,
@@ -57,42 +67,42 @@ fn main() {
                 i += 2;
             }
             "--demote" => {
-                let rx: u32 = args[i + 1].parse().expect("invalid region x");
-                let ry: u32 = args[i + 2].parse().expect("invalid region y");
+                let rx: u32 = parse_region(&args[i + 1]);
+                let ry: u32 = parse_region(&args[i + 2]);
                 demote.push((rx, ry));
                 i += 3;
             }
             "--promote" => {
-                let rx: u32 = args[i + 1].parse().expect("invalid region x");
-                let ry: u32 = args[i + 2].parse().expect("invalid region y");
+                let rx: u32 = parse_region(&args[i + 1]);
+                let ry: u32 = parse_region(&args[i + 2]);
                 promote.push((rx, ry));
                 i += 3;
             }
             "--demote-at" => {
                 let t: u64 = args[i + 1].parse().expect("invalid tick");
-                let rx: u32 = args[i + 2].parse().expect("invalid region x");
-                let ry: u32 = args[i + 3].parse().expect("invalid region y");
+                let rx: u32 = parse_region(&args[i + 2]);
+                let ry: u32 = parse_region(&args[i + 3]);
                 events.push((t, (ry * 2 + rx) as u8, Action::Demote));
                 i += 4;
             }
             "--promote-at" => {
                 let t: u64 = args[i + 1].parse().expect("invalid tick");
-                let rx: u32 = args[i + 2].parse().expect("invalid region x");
-                let ry: u32 = args[i + 3].parse().expect("invalid region y");
+                let rx: u32 = parse_region(&args[i + 2]);
+                let ry: u32 = parse_region(&args[i + 3]);
                 events.push((t, (ry * 2 + rx) as u8, Action::Promote));
                 i += 4;
             }
             "--collapse-at" => {
                 let t: u64 = args[i + 1].parse().expect("invalid tick");
-                let rx: u32 = args[i + 2].parse().expect("invalid region x");
-                let ry: u32 = args[i + 3].parse().expect("invalid region y");
+                let rx: u32 = parse_region(&args[i + 2]);
+                let ry: u32 = parse_region(&args[i + 3]);
                 events.push((t, (ry * 2 + rx) as u8, Action::Collapse));
                 i += 4;
             }
             "--expand-at" => {
                 let t: u64 = args[i + 1].parse().expect("invalid tick");
-                let rx: u32 = args[i + 2].parse().expect("invalid region x");
-                let ry: u32 = args[i + 3].parse().expect("invalid region y");
+                let rx: u32 = parse_region(&args[i + 2]);
+                let ry: u32 = parse_region(&args[i + 3]);
                 events.push((t, (ry * 2 + rx) as u8, Action::Promote));
                 i += 4;
             }
@@ -268,6 +278,17 @@ fn run_gravity(
                     px: tot.px,
                     py: tot.py,
                     energy: tot.energy,
+                })
+                .expect("stream write failed");
+                w.write(&Record::RegionMultipole {
+                    tick: tot.tick,
+                    region_x: (tot.region % 2) as u32,
+                    region_y: (tot.region / 2) as u32,
+                    mx: tot.mx,
+                    my: tot.my,
+                    qxx: tot.qxx,
+                    qxy: tot.qxy,
+                    qyy: tot.qyy,
                 })
                 .expect("stream write failed");
             }

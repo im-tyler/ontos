@@ -35,6 +35,7 @@ fn verify_golden(name: &str, seed: u64) {
             Record::BodyState { .. } => panic!("body record in life stream"),
             Record::TotalsState { .. } => panic!("totals record in life stream"),
             Record::RegionCollapsed { .. } => panic!("collapse record in life stream"),
+            Record::RegionMultipole { .. } => panic!("multipole record in life stream"),
             Record::RegionLevel {
                 region_x,
                 region_y,

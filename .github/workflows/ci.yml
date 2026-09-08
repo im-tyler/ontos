@@ -63,3 +63,5 @@ jobs:
           verify 300 5 --mode gravity --bodies 10 --observer 777
           verify 200 11 --mode gravity --bodies 10 --collapse-at 30 1 1 --expand-at 120 1 1
           verify 300 13 --mode gravity --bodies 12 --observer 42 --collapse-at 40 0 0
+          verify 240 17 --mode gravity --bodies 12 --collapse-at 20 0 0 --expand-at 90 0 0 --collapse-at 91 0 0 --expand-at 160 0 0 --collapse-at 40 1 1 --expand-at 120 1 1 --demote-at 60 0 1
+          verify 160 19 --mode gravity --bodies 6 --collapse-at 15 1 1 --expand-at 60 1 1 --collapse-at 30 0 0 --expand-at 100 0 0
