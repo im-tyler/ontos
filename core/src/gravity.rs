@@ -10,6 +10,8 @@ pub const DEGREE: usize = 8;
 pub const SAMPLES: usize = 33;
 pub const UNMANAGED: u8 = 255;
 pub const CONTACT_R: f64 = 2.0;
+pub const MONOPOLE_BASE: u32 = 0xFF00_0000;
+pub const WALL_BASE: u32 = 0xFFFF_FF00;
 
 pub struct SplitMix64 {
     state: u64,
@@ -99,6 +101,8 @@ pub struct CollapseTotals {
     pub qxx: f64,
     pub qxy: f64,
     pub qyy: f64,
+    pub binding: f64,
+    pub radial: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,7 +113,9 @@ pub struct ContactEvent {
     pub jn: f64,
     pub cx: f64,
     pub cy: f64,
+    pub vn: f64,
     pub vn_after: f64,
+    pub mu: f64,
 }
 
 pub struct Observer {
@@ -173,6 +179,7 @@ pub struct GravityWorld {
     pub region_mode: [RegionMode; 4],
     pub region_totals: [Option<CollapseTotals>; 4],
     pub region_multipole: [bool; 4],
+    pub region_radial: [bool; 4],
     pub collapse_records: Vec<CollapseTotals>,
     pub events: BTreeMap<u64, Vec<(u8, Action)>>,
     pub tick: u64,
@@ -180,8 +187,13 @@ pub struct GravityWorld {
     pub py: f64,
     pub observer: Option<Observer>,
     pub multipole: bool,
+    pub radial: bool,
     pub last_expansion: Vec<Body>,
     pub contacts: bool,
+    pub contact_params: bool,
+    pub restitution: f64,
+    pub friction: f64,
+    pub walls: bool,
     pub touching: BTreeSet<(u32, u32)>,
     pub last_contacts: Vec<ContactEvent>,
 }
@@ -234,6 +246,7 @@ impl GravityWorld {
             region_mode: [RegionMode::Fine; 4],
             region_totals: [None; 4],
             region_multipole: [false; 4],
+            region_radial: [false; 4],
             collapse_records: Vec::new(),
             events: BTreeMap::new(),
             tick: 0,
@@ -241,8 +254,13 @@ impl GravityWorld {
             py,
             observer: None,
             multipole: true,
+            radial: false,
             last_expansion: Vec::new(),
             contacts: false,
+            contact_params: false,
+            restitution: 0.0,
+            friction: 0.0,
+            walls: false,
             touching: BTreeSet::new(),
             last_contacts: Vec::new(),
         }
@@ -421,9 +439,12 @@ impl GravityWorld {
                 qxx: 0.0,
                 qxy: 0.0,
                 qyy: 0.0,
+                binding: 0.0,
+                radial: self.radial,
             };
             self.region_totals[region as usize] = Some(totals);
             self.region_multipole[region as usize] = self.multipole;
+            self.region_radial[region as usize] = self.radial;
             self.collapse_records.push(totals);
             self.region_mode[region as usize] = RegionMode::Collapsed;
             return;
@@ -444,12 +465,14 @@ impl GravityWorld {
             ke += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy);
         }
         let mut pe = 0.0f64;
+        let mut binding = 0.0f64;
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
                 let dx = states[j].x - states[i].x;
                 let dy = states[j].y - states[i].y;
                 let s2 = dx * dx + dy * dy + EPS2;
                 pe -= states[i].mass * states[j].mass / s2.sqrt();
+                binding += states[i].mass * states[j].mass / s2.sqrt();
             }
         }
         let com_x = mx / mass;
@@ -513,9 +536,12 @@ impl GravityWorld {
             qxx,
             qxy,
             qyy,
+            binding,
+            radial: self.radial,
         };
         self.region_totals[region as usize] = Some(totals);
         self.region_multipole[region as usize] = self.multipole;
+        self.region_radial[region as usize] = self.radial;
         self.collapse_records.push(totals);
         self.region_mode[region as usize] = RegionMode::Collapsed;
     }
@@ -526,18 +552,26 @@ impl GravityWorld {
             .collect();
         let totals = self.region_totals[region as usize].take();
         let multipole = self.region_multipole[region as usize];
+        let radial = self.region_radial[region as usize];
         self.region_multipole[region as usize] = false;
+        self.region_radial[region as usize] = false;
         if !members.is_empty() {
             let t = totals.expect("collapsed region carries totals");
+            let mut sigma = 1.0f64;
             if multipole {
-                self.expand_positions(&members, &t);
+                let mut base = self.expand_base(&members, &t);
+                if radial {
+                    let fl = self.radial_scale(&members, &t, &mut base);
+                    sigma = self.solve_spread_sigma(&members, &t, t.energy + fl);
+                }
+                self.apply_dipole_residual(&members, &t, &base);
             }
             let mut sx = 0.0f64;
             let mut sy = 0.0f64;
             for &i in &members[..members.len() - 1] {
                 let c = self.collapsed[i].take().expect("collapsed body");
-                self.bodies[i].vx = t.vcom_x + c.sx;
-                self.bodies[i].vy = t.vcom_y + c.sy;
+                self.bodies[i].vx = t.vcom_x + sigma * c.sx;
+                self.bodies[i].vy = t.vcom_y + sigma * c.sy;
                 sx += self.bodies[i].mass * self.bodies[i].vx;
                 sy += self.bodies[i].mass * self.bodies[i].vy;
             }
@@ -553,7 +587,7 @@ impl GravityWorld {
         self.region_mode[region as usize] = RegionMode::Fine;
     }
 
-    fn expand_positions(&mut self, members: &[usize], t: &CollapseTotals) {
+    fn expand_base(&self, members: &[usize], t: &CollapseTotals) -> Vec<(f64, f64)> {
         let mut base: Vec<(f64, f64)> = members
             .iter()
             .map(|&i| {
@@ -609,6 +643,15 @@ impl GravityWorld {
                 }
             }
         }
+        base
+    }
+
+    fn apply_dipole_residual(
+        &mut self,
+        members: &[usize],
+        t: &CollapseTotals,
+        base: &[(f64, f64)],
+    ) {
         let mut sum_mx = 0.0f64;
         let mut sum_my = 0.0f64;
         for (slot, &i) in members[..members.len() - 1].iter().enumerate() {
@@ -620,6 +663,128 @@ impl GravityWorld {
         let last = members[members.len() - 1];
         self.bodies[last].x = (t.mx - sum_mx) / self.bodies[last].mass;
         self.bodies[last].y = (t.my - sum_my) / self.bodies[last].mass;
+    }
+
+    fn radial_scale(&self, members: &[usize], t: &CollapseTotals, base: &mut [(f64, f64)]) -> f64 {
+        if members.len() < 2 {
+            return 0.0;
+        }
+        let mut pairs: Vec<(f64, f64)> =
+            Vec::with_capacity(members.len() * (members.len() - 1) / 2);
+        for a in 0..members.len() {
+            for b in (a + 1)..members.len() {
+                let w = self.bodies[members[a]].mass * self.bodies[members[b]].mass;
+                let dx = base[b].0 - base[a].0;
+                let dy = base[b].1 - base[a].1;
+                pairs.push((w, dx * dx + dy * dy));
+            }
+        }
+        let f = |lam: f64| -> f64 {
+            let mut total = 0.0f64;
+            for &(w, d2) in &pairs {
+                total += w / (lam * lam * d2 + 1.0).sqrt();
+            }
+            total
+        };
+        let target = t.binding;
+        let lam = if target >= f(0.0) {
+            0.0
+        } else {
+            let mut hi = 1.0f64;
+            let mut doublings = 0;
+            while f(hi) > target && doublings < 64 {
+                hi *= 2.0;
+                doublings += 1;
+            }
+            let mut lo = 0.0f64;
+            for _ in 0..128 {
+                let mid = (lo + hi) * 0.5;
+                if f(mid) >= target {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            (lo + hi) * 0.5
+        };
+        for b in base.iter_mut() {
+            b.0 *= lam;
+            b.1 *= lam;
+        }
+        let mut swx = 0.0f64;
+        let mut swy = 0.0f64;
+        for (slot, &i) in members.iter().enumerate() {
+            let m = self.bodies[i].mass;
+            swx += m * base[slot].0;
+            swy += m * base[slot].1;
+        }
+        let wx = swx / t.mass;
+        let wy = swy / t.mass;
+        for b in base.iter_mut() {
+            b.0 -= wx;
+            b.1 -= wy;
+        }
+        f(lam)
+    }
+
+    fn synth_velocities(
+        &self,
+        members: &[usize],
+        t: &CollapseTotals,
+        sigma: f64,
+    ) -> Vec<(f64, f64)> {
+        let mut out = Vec::with_capacity(members.len());
+        let mut sx = 0.0f64;
+        let mut sy = 0.0f64;
+        for (slot, &i) in members.iter().enumerate() {
+            if slot + 1 < members.len() {
+                let c = self.collapsed[i].expect("collapsed body");
+                let vx = t.vcom_x + sigma * c.sx;
+                let vy = t.vcom_y + sigma * c.sy;
+                sx += self.bodies[i].mass * vx;
+                sy += self.bodies[i].mass * vy;
+                out.push((vx, vy));
+            } else {
+                out.push((
+                    (t.px - sx) / self.bodies[i].mass,
+                    (t.py - sy) / self.bodies[i].mass,
+                ));
+            }
+        }
+        out
+    }
+
+    fn synth_ke(&self, members: &[usize], t: &CollapseTotals, sigma: f64) -> f64 {
+        let vs = self.synth_velocities(members, t, sigma);
+        let mut ke = 0.0f64;
+        for (slot, &(vx, vy)) in vs.iter().enumerate() {
+            let m = self.bodies[members[slot]].mass;
+            ke += 0.5 * m * (vx * vx + vy * vy);
+        }
+        ke
+    }
+
+    fn solve_spread_sigma(&self, members: &[usize], t: &CollapseTotals, k_target: f64) -> f64 {
+        let c0 = self.synth_ke(members, t, 0.0);
+        let c1 = self.synth_ke(members, t, 1.0);
+        let cm = self.synth_ke(members, t, -1.0);
+        let a = ((c1 + cm) - (c0 + c0)) * 0.5;
+        let b = (c1 - cm) * 0.5;
+        let disc = b * b - 4.0 * a * (c0 - k_target);
+        if a == 0.0 {
+            0.0
+        } else if disc < 0.0 {
+            (0.0 - b) / (2.0 * a)
+        } else {
+            let sq = disc.sqrt();
+            let r1 = ((0.0 - b) + sq) / (2.0 * a);
+            let r2 = ((0.0 - b) - sq) / (2.0 * a);
+            if r1 * r1 <= r2 * r2 {
+                r1
+            } else {
+                r2
+            }
+        }
     }
 
     fn apply_event(&mut self, region: u8, action: Action) {
@@ -806,6 +971,9 @@ impl GravityWorld {
             .iter()
             .map(|b| CONTACT_R * b.mass.sqrt())
             .collect();
+        let e = self.restitution;
+        let fr = self.friction;
+        let extended = self.contact_params;
         let mut next = BTreeSet::new();
         let mut events = Vec::new();
         for i in 0..n {
@@ -813,11 +981,15 @@ impl GravityWorld {
                 continue;
             }
             for j in (i + 1)..n {
-                if kind[j] != 0 {
+                if kind[j] == 2 {
                     continue;
                 }
-                let dx = self.bodies[j].x - self.bodies[i].x;
-                let dy = self.bodies[j].y - self.bodies[i].y;
+                if kind[j] != 0 && !extended {
+                    continue;
+                }
+                let sj = self.body_state_at(j, entering);
+                let dx = sj.x - self.bodies[i].x;
+                let dy = sj.y - self.bodies[i].y;
                 let rs = radii[i] + radii[j];
                 let d2 = dx * dx + dy * dy;
                 if d2 >= rs * rs {
@@ -831,43 +1003,229 @@ impl GravityWorld {
                     let dist = d2.sqrt();
                     (dx / dist, dy / dist)
                 };
-                let vrx = self.bodies[j].vx - self.bodies[i].vx;
-                let vry = self.bodies[j].vy - self.bodies[i].vy;
+                let vrx = sj.vx - self.bodies[i].vx;
+                let vry = sj.vy - self.bodies[i].vy;
                 let vn = vrx * nx + vry * ny;
                 if vn >= 0.0 {
                     continue;
                 }
                 let mi = self.bodies[i].mass;
                 let mj = self.bodies[j].mass;
-                let cx = (self.bodies[i].x + self.bodies[j].x) * 0.5;
-                let cy = (self.bodies[i].y + self.bodies[j].y) * 0.5;
-                let inv = 1.0 / (mi + mj);
-                let t = vn * inv;
-                let fi = t * mj;
-                let fj = t * mi;
-                self.bodies[i].vx += fi * nx;
-                self.bodies[i].vy += fi * ny;
-                self.bodies[j].vx -= fj * nx;
-                self.bodies[j].vy -= fj * ny;
+                let cx = (self.bodies[i].x + sj.x) * 0.5;
+                let cy = (self.bodies[i].y + sj.y) * 0.5;
+                let (jn, mu) = if kind[j] == 0 {
+                    let inv = 1.0 / (mi + mj);
+                    let t = vn * inv;
+                    let s = (1.0 + e) * t;
+                    let fi = s * mj;
+                    let fj = s * mi;
+                    self.bodies[i].vx += fi * nx;
+                    self.bodies[i].vy += fi * ny;
+                    self.bodies[j].vx -= fj * nx;
+                    self.bodies[j].vy -= fj * ny;
+                    let mu = (mi * mj) / (mi + mj);
+                    let jn = ((0.0 - vn) * (1.0 + e)) * mu;
+                    if fr > 0.0 {
+                        let vt = (0.0 - vrx) * ny + vry * nx;
+                        let mut q = vt * inv;
+                        let qmax = (fr * jn) * inv;
+                        if q > qmax {
+                            q = qmax;
+                        }
+                        if q < 0.0 - qmax {
+                            q = 0.0 - qmax;
+                        }
+                        let fti = q * mj;
+                        let ftj = q * mi;
+                        self.bodies[i].vx += fti * (0.0 - ny);
+                        self.bodies[i].vy += fti * nx;
+                        self.bodies[j].vx -= ftj * (0.0 - ny);
+                        self.bodies[j].vy -= ftj * nx;
+                    }
+                    (jn, mu)
+                } else {
+                    let (_, jn) = self.static_impulse(i, nx, ny, vrx, vry);
+                    (jn, mi)
+                };
                 if self.touching.contains(&pair) {
                     continue;
                 }
                 let vn_after = (self.bodies[j].vx - self.bodies[i].vx) * nx
                     + (self.bodies[j].vy - self.bodies[i].vy) * ny;
-                let mu = (mi * mj) / (mi + mj);
                 events.push(ContactEvent {
                     tick: entering,
                     a: i as u32,
                     b: j as u32,
-                    jn: -vn * mu,
+                    jn,
                     cx,
                     cy,
+                    vn,
                     vn_after,
+                    mu,
                 });
+            }
+        }
+        if extended {
+            for region in 0..4u8 {
+                let tot = match self.region_mode[region as usize] {
+                    RegionMode::Collapsed => match &self.region_totals[region as usize] {
+                        Some(t) if t.count > 0 => *t,
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                let big_r = CONTACT_R * tot.mass.sqrt();
+                for i in 0..n {
+                    if kind[i] != 0 {
+                        continue;
+                    }
+                    let dx = tot.com_x - self.bodies[i].x;
+                    let dy = tot.com_y - self.bodies[i].y;
+                    let rs = radii[i] + big_r;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 >= rs * rs {
+                        continue;
+                    }
+                    let pair = (i as u32, MONOPOLE_BASE + region as u32);
+                    next.insert(pair);
+                    let (nx, ny) = if d2 == 0.0 {
+                        (1.0, 0.0)
+                    } else {
+                        let dist = d2.sqrt();
+                        (dx / dist, dy / dist)
+                    };
+                    let vrx = tot.vcom_x - self.bodies[i].vx;
+                    let vry = tot.vcom_y - self.bodies[i].vy;
+                    let vn = vrx * nx + vry * ny;
+                    if vn >= 0.0 {
+                        continue;
+                    }
+                    let mi = self.bodies[i].mass;
+                    let cx = (self.bodies[i].x + tot.com_x) * 0.5;
+                    let cy = (self.bodies[i].y + tot.com_y) * 0.5;
+                    let (_, jn) = self.static_impulse(i, nx, ny, vrx, vry);
+                    let mu = (mi * tot.mass) / (mi + tot.mass);
+                    if self.touching.contains(&pair) {
+                        continue;
+                    }
+                    let vn_after = (tot.vcom_x - self.bodies[i].vx) * nx
+                        + (tot.vcom_y - self.bodies[i].vy) * ny;
+                    events.push(ContactEvent {
+                        tick: entering,
+                        a: i as u32,
+                        b: MONOPOLE_BASE + region as u32,
+                        jn,
+                        cx,
+                        cy,
+                        vn,
+                        vn_after,
+                        mu,
+                    });
+                }
+            }
+        }
+        if self.walls {
+            for i in 0..n {
+                if kind[i] != 0 {
+                    continue;
+                }
+                for wall in 0..4u32 {
+                    let (nx, ny, cx, cy) = match wall {
+                        0 => {
+                            if !(self.bodies[i].x - radii[i] < 0.0 && self.bodies[i].vx < 0.0) {
+                                continue;
+                            }
+                            (
+                                0.0 - 1.0,
+                                0.0,
+                                (self.bodies[i].x + 0.0) * 0.5,
+                                self.bodies[i].y,
+                            )
+                        }
+                        1 => {
+                            if !(self.bodies[i].x + radii[i] > 128.0 && self.bodies[i].vx > 0.0) {
+                                continue;
+                            }
+                            (1.0, 0.0, (self.bodies[i].x + 128.0) * 0.5, self.bodies[i].y)
+                        }
+                        2 => {
+                            if !(self.bodies[i].y - radii[i] < 0.0 && self.bodies[i].vy < 0.0) {
+                                continue;
+                            }
+                            (
+                                0.0,
+                                0.0 - 1.0,
+                                self.bodies[i].x,
+                                (self.bodies[i].y + 0.0) * 0.5,
+                            )
+                        }
+                        _ => {
+                            if !(self.bodies[i].y + radii[i] > 128.0 && self.bodies[i].vy > 0.0) {
+                                continue;
+                            }
+                            (0.0, 1.0, self.bodies[i].x, (self.bodies[i].y + 128.0) * 0.5)
+                        }
+                    };
+                    let pair = (i as u32, WALL_BASE + wall);
+                    next.insert(pair);
+                    let vrx = 0.0 - self.bodies[i].vx;
+                    let vry = 0.0 - self.bodies[i].vy;
+                    let vn = vrx * nx + vry * ny;
+                    if vn >= 0.0 {
+                        continue;
+                    }
+                    let (vn, jn) = self.static_impulse(i, nx, ny, vrx, vry);
+                    let mi = self.bodies[i].mass;
+                    if self.touching.contains(&pair) {
+                        continue;
+                    }
+                    let vn_after = (0.0 - self.bodies[i].vx) * nx + (0.0 - self.bodies[i].vy) * ny;
+                    events.push(ContactEvent {
+                        tick: entering,
+                        a: i as u32,
+                        b: WALL_BASE + wall,
+                        jn,
+                        cx,
+                        cy,
+                        vn,
+                        vn_after,
+                        mu: mi,
+                    });
+                }
             }
         }
         self.touching = next;
         self.last_contacts.extend(events);
+    }
+
+    fn static_impulse(&mut self, i: usize, nx: f64, ny: f64, vrx: f64, vry: f64) -> (f64, f64) {
+        let e = self.restitution;
+        let fr = self.friction;
+        let mi = self.bodies[i].mass;
+        let vn = vrx * nx + vry * ny;
+        let s = (1.0 + e) * vn;
+        self.bodies[i].vx += s * nx;
+        self.bodies[i].vy += s * ny;
+        self.px += mi * (s * nx);
+        self.py += mi * (s * ny);
+        let jn = (0.0 - s) * mi;
+        if fr > 0.0 {
+            let vt = (0.0 - vrx) * ny + vry * nx;
+            let mut jt = vt * mi;
+            let jt_max = fr * jn;
+            if jt > jt_max {
+                jt = jt_max;
+            }
+            if jt < 0.0 - jt_max {
+                jt = 0.0 - jt_max;
+            }
+            let w = jt / mi;
+            self.bodies[i].vx += w * (0.0 - ny);
+            self.bodies[i].vy += w * nx;
+            self.px += jt * (0.0 - ny);
+            self.py += jt * nx;
+        }
+        (vn, jn)
     }
 
     pub fn totals(&self) -> (u64, u64, f64, f64, f64, f64) {
@@ -1585,5 +1943,263 @@ mod tests {
             let approx = clenshaw(&c, s);
             assert!((approx - sample.x).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn radial_replay_bit_identical() {
+        let run = || {
+            let mut w = GravityWorld::new(17, 12);
+            w.radial = true;
+            w.schedule(20, 0, Action::Collapse);
+            w.schedule(90, 0, Action::Promote);
+            w.schedule(91, 0, Action::Collapse);
+            w.schedule(160, 0, Action::Promote);
+            w.schedule(40, 2, Action::Collapse);
+            w.schedule(120, 2, Action::Promote);
+            w.schedule(60, 3, Action::Demote);
+            let mut hashes = Vec::new();
+            for _ in 0..200 {
+                w.step();
+                hashes.push(w.world_hash());
+            }
+            hashes
+        };
+        assert_eq!(run(), run());
+    }
+
+    fn all_in_region_world(count: u32) -> GravityWorld {
+        let mut world = None;
+        for seed in 0..100_000u64 {
+            let w = GravityWorld::new(seed, count);
+            let all_in = w
+                .bodies
+                .iter()
+                .all(|b| b.x >= 64.0 && b.x < 128.0 && b.y >= 64.0 && b.y < 128.0);
+            if all_in {
+                world = Some(w);
+                break;
+            }
+        }
+        world.expect("seed with all bodies in region 3")
+    }
+
+    #[test]
+    fn radial_binding_and_energy_close_on_totals() {
+        let mut w = all_in_region_world(6);
+        w.radial = true;
+        w.schedule(1, 3, Action::Collapse);
+        w.schedule(60, 3, Action::Promote);
+        for _ in 0..60 {
+            w.step();
+        }
+        assert_eq!(w.collapse_records.len(), 1);
+        assert_eq!(w.last_expansion.len(), 6);
+        let rec = w.collapse_records[0];
+        let exp = &w.last_expansion;
+        let mut sx = 0.0f64;
+        let mut sy = 0.0f64;
+        for b in exp {
+            sx += b.mass * b.x;
+            sy += b.mass * b.y;
+        }
+        let dipole_scale = rec.mx.abs().max(rec.my.abs()).max(1e-30);
+        let dipole = (sx - rec.mx).abs().max((sy - rec.my).abs()) / dipole_scale;
+        assert!(dipole < 1e-12, "dipole residual {dipole}");
+        let mut binding = 0.0f64;
+        for i in 0..exp.len() {
+            for j in (i + 1)..exp.len() {
+                let dx = exp[j].x - exp[i].x;
+                let dy = exp[j].y - exp[i].y;
+                binding += exp[i].mass * exp[j].mass / (dx * dx + dy * dy + 1.0).sqrt();
+            }
+        }
+        let binding_rel = (binding - rec.binding).abs() / rec.binding.abs().max(1e-30);
+        assert!(binding_rel < 1e-9, "binding residual {binding_rel}");
+        let mut ke = 0.0f64;
+        for b in exp {
+            ke += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy);
+        }
+        let pe = 0.0f64 - binding;
+        let energy_rel = ((ke + pe) - rec.energy).abs() / rec.energy.abs().max(1.0);
+        assert!(energy_rel < 1e-9, "energy delta {energy_rel}");
+        let mut qxx = 0.0f64;
+        let mut qxy = 0.0f64;
+        let mut qyy = 0.0f64;
+        for b in exp {
+            let dx = b.x - rec.com_x;
+            let dy = b.y - rec.com_y;
+            qxx += b.mass * dx * dx;
+            qxy += b.mass * dx * dy;
+            qyy += b.mass * dy * dy;
+        }
+        let q_scale = rec.qxx.abs().max(rec.qyy.abs()).max(1e-30);
+        let quad = (qxx - rec.qxx)
+            .abs()
+            .max((qxy - rec.qxy).abs())
+            .max((qyy - rec.qyy).abs())
+            / q_scale;
+        assert!(quad < 4.0, "quadrupole deviation {quad}");
+    }
+
+    #[test]
+    fn radial_modes_differ_from_section20() {
+        let schedule = |w: &mut GravityWorld| {
+            w.schedule(20, 0, Action::Collapse);
+            w.schedule(90, 0, Action::Promote);
+        };
+        let mut a = GravityWorld::new(17, 12);
+        schedule(&mut a);
+        let mut b = GravityWorld::new(17, 12);
+        b.radial = true;
+        schedule(&mut b);
+        for _ in 0..150 {
+            a.step();
+            b.step();
+        }
+        assert_ne!(a.world_hash(), b.world_hash());
+    }
+
+    #[test]
+    fn restitution_bounces_closes_on_minus_e_vn_and_keeps_ledger() {
+        let mut w = GravityWorld::new(11, 32);
+        w.contacts = true;
+        w.contact_params = true;
+        w.restitution = 0.5;
+        w.friction = 0.25;
+        let (_, _, _, px0, py0, _) = w.totals();
+        let mut records = 0u64;
+        let mut worst = 0.0f64;
+        for _ in 0..400 {
+            w.step();
+            for c in &w.last_contacts {
+                assert!(c.jn > 0.0);
+                let expect = 0.0 - c.vn * 0.5;
+                worst = worst.max((c.vn_after - expect).abs());
+                records += 1;
+            }
+            w.last_contacts.clear();
+        }
+        assert!(records >= 3, "expected several contacts, got {records}");
+        assert!(worst < 1e-12, "worst |vn_after + e*vn| {worst}");
+        let (_, _, _, px1, py1, _) = w.totals();
+        assert_eq!(
+            (px0, py0),
+            (px1, py1),
+            "all-fine ledger exact under e/friction"
+        );
+    }
+
+    #[test]
+    fn wall_bounce_reflects_and_books_ledger() {
+        let mut w = GravityWorld::new(3, 1);
+        w.contacts = true;
+        w.contact_params = true;
+        w.walls = true;
+        w.restitution = 0.5;
+        w.friction = 0.25;
+        w.bodies[0].x = -1.0;
+        w.bodies[0].y = 50.0;
+        w.bodies[0].vx = -0.5;
+        w.bodies[0].vy = 0.25;
+        let m = w.bodies[0].mass;
+        let px0 = w.px;
+        let py0 = w.py;
+        w.step();
+        let c = &w.last_contacts[0];
+        assert_eq!(c.b, WALL_BASE, "x=0 wall pseudo id");
+        assert_eq!(c.a, 0);
+        assert!(c.jn > 0.0);
+        let x_at_pass = -1.0 + (-0.5) * DT;
+        assert!(
+            (c.cx - ((x_at_pass + 0.0) * 0.5)).abs() < 1e-12,
+            "contact point midpoint {}",
+            c.cx
+        );
+        assert!(
+            (c.cy - (50.0 + 0.25 * DT)).abs() < 1e-9,
+            "wall contact carries the body y {}",
+            c.cy
+        );
+        assert!(
+            (w.bodies[0].vx - 0.25).abs() < 1e-12,
+            "reflected vx {}",
+            w.bodies[0].vx
+        );
+        assert!(
+            (w.bodies[0].vy - 0.0625).abs() < 1e-12,
+            "friction-damped vy {}",
+            w.bodies[0].vy
+        );
+        let s = (1.0 + 0.5) * -0.5;
+        let jt = 0.1875 * m;
+        assert!(
+            (w.px - (px0 + m * (s * (0.0 - 1.0)))).abs() < 1e-12,
+            "ledger px {}",
+            w.px - px0
+        );
+        assert!(
+            (w.py - (py0 + jt * (0.0 - 1.0))).abs() < 1e-12,
+            "ledger py books the tangential impulse {}",
+            w.py - py0
+        );
+        assert!(c.vn_after > 0.0, "separating after bounce");
+    }
+
+    #[test]
+    fn monopole_contact_one_sided_with_frozen_totals() {
+        let mut world = None;
+        for seed in 0..100_000u64 {
+            let w = GravityWorld::new(seed, 5);
+            let in3 = w
+                .bodies
+                .iter()
+                .filter(|b| b.x >= 64.0 && b.x < 128.0 && b.y >= 64.0 && b.y < 128.0)
+                .count();
+            if in3 >= 3 && w.bodies[0].x < 64.0 {
+                world = Some(w);
+                break;
+            }
+        }
+        let mut w = world.expect("seed with bodies inside and outside region 3");
+        w.contacts = true;
+        w.contact_params = true;
+        w.restitution = 0.5;
+        w.schedule(1, 3, Action::Collapse);
+        w.step();
+        let (com_x, com_y, vcom_x, vcom_y, mass) = {
+            let t = w.region_totals[3].expect("collapsed");
+            (t.com_x, t.com_y, t.vcom_x, t.vcom_y, t.mass)
+        };
+        w.bodies[0].x = com_x - 2.0;
+        w.bodies[0].y = com_y;
+        w.bodies[0].vx = vcom_x + 1.0;
+        w.bodies[0].vy = vcom_y;
+        let mi = w.bodies[0].mass;
+        w.step();
+        let events = std::mem::take(&mut w.last_contacts);
+        assert_eq!(events.len(), 1, "one monopole contact");
+        let c = &events[0];
+        assert_eq!(c.b, MONOPOLE_BASE + 3, "region 3 pseudo id");
+        assert_eq!(c.a, 0);
+        assert!(c.jn > 0.0);
+        let expected_jn = (0.0 - c.vn) * (1.0 + 0.5) * mi;
+        assert!((c.jn - expected_jn).abs() < 1e-12, "one-sided jn {}", c.jn);
+        assert!(
+            (c.vn_after - (0.0 - c.vn * 0.5)).abs() < 1e-12,
+            "bounce closes on -e*vn"
+        );
+        let t = w.region_totals[3].expect("still collapsed");
+        assert_eq!(
+            (t.com_x, t.com_y, t.vcom_x, t.vcom_y, t.mass),
+            (com_x, com_y, vcom_x, vcom_y, mass)
+        );
+        let big_r = CONTACT_R * mass.sqrt();
+        let r0 = CONTACT_R * mi.sqrt();
+        let dx = w.bodies[0].x - com_x;
+        let dy = w.bodies[0].y - com_y;
+        assert!(
+            dx * dx + dy * dy < (big_r + r0) * (big_r + r0),
+            "still inside the disk"
+        );
     }
 }

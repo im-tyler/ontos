@@ -119,10 +119,23 @@ The physics engine is not a dependency of this project. It is the product.
   consumers are bit-identical cross-platform; FNV-1a64 hash over the
   PCM bytes). Verified bit-exact by three implementations (Rust CLI
   `--wav`, simval `python3 -m simval.ontos_audio`, light-system
-  `ontos_stream_dump`/`ontos_view --wav`). Open: friction/restitution
-  parameters, body-boundary contact (the v2 world is the unbounded
-  plane — there is no boundary yet), contact between coarse/collapsed
-  modes, spatialized audio.
+  `ontos_stream_dump`/`ontos_view --wav`). v2 DONE 2026-09-08 (spec
+  section 24): restitution and Coulomb-clamped friction parameters
+  travel in a ContactParams record (tag 12; absence keeps section 21
+  bit-identical); fine bodies resolve one-sided against frozen
+  contactants — ephemeris-coarse bodies (polynomial-evaluated
+  positions), collapsed-region monopoles (a disk of mass M at com,
+  radius by the same mass law), and the walls of a bounded world at
+  the managed extent — with the static impulses booking the ledger
+  exactly like fc kicks (fine-fine pairs still conserve it by axiom;
+  measured: all-fine runs keep the ledger bit-exact for any e and
+  friction). Static contactants ride Contact records as pseudo body
+  ids (monopoles 0xFF000000+region, walls 0xFFFFFF00+wall) and feed
+  the section 22 audio with their own reduced-mass rule. Open:
+  spatialized/realtime audio, wall-hit corpora at wall-reachable
+  timescales (spec initial conditions keep bodies >= 32 from the
+  walls; wall physics is unit-tested in ontos and simval and the
+  no-hit corpus pins the format).
 - **Phase 4 — reconstruction:** v1 experiment DONE 2026-09-07 (spec
   section 19: collapse to totals-only monopole + deterministic
   reconstruction on expansion with exact momentum residual). v2 DONE
@@ -138,11 +151,26 @@ The physics engine is not a dependency of this project. It is the product.
   tolerance 64; ledger drift < 1e-2) and the synthesized-set energy
   delta improves 2-20x over section 19. Section 19 streams remain
   valid input (mode selected per collapse cycle by record presence).
-  The orchestrator sweeps parameter grids with MAD-outlier detection
-  including the multipole metrics. Open: collapse-on-coarse composition
-  semantics, octupole-and-beyond constrained synthesis, radial
-  distribution shape (energy delta still O(1) — tensor match does not
-  pin pair distances).
+  v3 DONE 2026-09-08 (spec section 23: radial-shape synthesis): the
+  observation driving it is that no finite set of moments pins pair
+  distances — potential energy is dominated by the closest pairs — so
+  the collapse now records its binding (the exact internal potential
+  statistic, RegionRadial tag 11) and the expansion closes on it
+  directly: a pinned 128-iteration bisection solves a strictly
+  monotone radial scale on the section 20 displacements, a
+  closed-form three-point quadratic solves the velocity-spread scale
+  that closes the synthesized kinetic energy on the recorded total,
+  and a post-scale recentering keeps the dipole residual exact. The
+  synthesized-set energy delta drops from O(1) (0.14-0.57 measured on
+  the multipole corpus) to rounding (~1e-14); the quadrupole closes
+  only to lambda^2 of the record (measured <= 1.9, bounded 4.0) —
+  the honest, documented trade. Opt-in via `--radial`; verified
+  bit-exact by three implementations (goldens g_radial, simval
+  examples/ontos_gravity/radial, C++ dump) with the new
+  `ontos_radial_shape` check closing binding/energy at 1e-9. Open:
+  collapse-on-coarse composition semantics; per-shell radial detail
+  beyond the single binding scalar (the pair-distance distribution is
+  now pinned only in aggregate).
 
 ## Non-goals
 

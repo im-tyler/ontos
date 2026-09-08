@@ -84,6 +84,17 @@ pub enum Record {
         cx: f64,
         cy: f64,
     },
+    RegionRadial {
+        tick: u64,
+        region_x: u32,
+        region_y: u32,
+        binding: f64,
+    },
+    ContactParams {
+        restitution: f64,
+        friction: f64,
+        walls: u8,
+    },
 }
 
 pub struct StreamWriter<W: Write> {
@@ -256,6 +267,28 @@ impl<W: Write> StreamWriter<W> {
                 self.out.write_all(&cx.to_le_bytes())?;
                 self.out.write_all(&cy.to_le_bytes())
             }
+            Record::RegionRadial {
+                tick,
+                region_x,
+                region_y,
+                binding,
+            } => {
+                self.out.write_all(&[11u8])?;
+                self.out.write_all(&tick.to_le_bytes())?;
+                self.out.write_all(&region_x.to_le_bytes())?;
+                self.out.write_all(&region_y.to_le_bytes())?;
+                self.out.write_all(&binding.to_le_bytes())
+            }
+            Record::ContactParams {
+                restitution,
+                friction,
+                walls,
+            } => {
+                self.out.write_all(&[12u8])?;
+                self.out.write_all(&restitution.to_le_bytes())?;
+                self.out.write_all(&friction.to_le_bytes())?;
+                self.out.write_all(&[*walls])
+            }
         }
     }
 
@@ -271,6 +304,7 @@ pub enum ParseError {
     UnknownTag(u8),
     Truncated,
     BadLevel(u8),
+    BadWalls(u8),
     Io(io::Error),
 }
 
@@ -288,6 +322,7 @@ impl std::fmt::Display for ParseError {
             ParseError::UnknownTag(t) => write!(f, "unknown record tag {t}"),
             ParseError::Truncated => write!(f, "truncated record"),
             ParseError::BadLevel(l) => write!(f, "invalid level byte {l}"),
+            ParseError::BadWalls(w) => write!(f, "invalid walls byte {w}"),
             ParseError::Io(e) => write!(f, "io error: {e}"),
         }
     }
@@ -303,6 +338,7 @@ impl PartialEq for ParseError {
             (ParseError::UnknownTag(a), ParseError::UnknownTag(b)) => a == b,
             (ParseError::Truncated, ParseError::Truncated) => true,
             (ParseError::BadLevel(a), ParseError::BadLevel(b)) => a == b,
+            (ParseError::BadWalls(a), ParseError::BadWalls(b)) => a == b,
             _ => false,
         }
     }
@@ -481,6 +517,27 @@ impl<R: Read> StreamReader<R> {
                     jn: f64::from_le_bytes(self.scratch[16..24].try_into().unwrap()),
                     cx: f64::from_le_bytes(self.scratch[24..32].try_into().unwrap()),
                     cy: f64::from_le_bytes(self.scratch[32..40].try_into().unwrap()),
+                }
+            }
+            11 => {
+                self.take(24)?;
+                Record::RegionRadial {
+                    tick: u64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
+                    region_x: u32::from_le_bytes(self.scratch[8..12].try_into().unwrap()),
+                    region_y: u32::from_le_bytes(self.scratch[12..16].try_into().unwrap()),
+                    binding: f64::from_le_bytes(self.scratch[16..24].try_into().unwrap()),
+                }
+            }
+            12 => {
+                self.take(17)?;
+                let walls = self.scratch[16];
+                if walls > 1 {
+                    return Err(ParseError::BadWalls(walls));
+                }
+                Record::ContactParams {
+                    restitution: f64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
+                    friction: f64::from_le_bytes(self.scratch[8..16].try_into().unwrap()),
+                    walls,
                 }
             }
             t => return Err(ParseError::UnknownTag(t)),
@@ -852,5 +909,67 @@ mod tests {
         assert_eq!(r.body_count(), Some(12));
         assert_eq!(r.next_record().unwrap(), Some(rec));
         assert_eq!(r.next_record().unwrap(), None);
+    }
+
+    #[test]
+    fn region_radial_roundtrip_gravity() {
+        let mut buf = Vec::new();
+        let rec = Record::RegionRadial {
+            tick: 30,
+            region_x: 1,
+            region_y: 1,
+            binding: 3.71875,
+        };
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 10).unwrap();
+            w.write(&rec).unwrap();
+            w.flush().unwrap();
+        }
+        assert_eq!(buf[20], 11);
+        assert_eq!(buf.len(), 21 + 24);
+        let mut r = StreamReader::new(&buf[..]).unwrap();
+        assert_eq!(r.next_record().unwrap(), Some(rec));
+        assert_eq!(r.next_record().unwrap(), None);
+    }
+
+    #[test]
+    fn contact_params_roundtrip_gravity() {
+        let mut buf = Vec::new();
+        let rec = Record::ContactParams {
+            restitution: 0.5,
+            friction: 0.25,
+            walls: 1,
+        };
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 8).unwrap();
+            w.write(&rec).unwrap();
+            w.flush().unwrap();
+        }
+        assert_eq!(buf[20], 12);
+        assert_eq!(buf.len(), 21 + 17);
+        let mut r = StreamReader::new(&buf[..]).unwrap();
+        assert_eq!(r.next_record().unwrap(), Some(rec));
+        assert_eq!(r.next_record().unwrap(), None);
+    }
+
+    #[test]
+    fn contact_params_rejects_bad_walls() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 8).unwrap();
+            w.write(&Record::ContactParams {
+                restitution: 0.0,
+                friction: 0.0,
+                walls: 2,
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            StreamReader::new(&buf[..])
+                .unwrap()
+                .next_record()
+                .unwrap_err(),
+            ParseError::BadWalls(2)
+        );
     }
 }

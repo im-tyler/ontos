@@ -16,8 +16,7 @@ const AMP: [f64; 3] = [0.5, 0.3, 0.2];
 
 pub struct Excitation {
     pub tick: u64,
-    pub mass_a: f64,
-    pub mass_b: f64,
+    pub mu: f64,
     pub jn: f64,
 }
 
@@ -26,7 +25,7 @@ pub fn synthesize(items: &[Excitation], final_tick: u64) -> Vec<i16> {
     let mut buf = vec![0.0f64; n];
     for item in items {
         let e = ((item.tick + 1) * SAMPLES_PER_TICK) as usize;
-        let mu = (item.mass_a * item.mass_b) / (item.mass_a + item.mass_b);
+        let mu = item.mu;
         for k in 0..3 {
             let omega = OMEGA0 * PARTIAL[k] / mu;
             let a = (2.0 - omega) * RHO[k];
@@ -126,14 +125,12 @@ mod tests {
         let items = vec![
             Excitation {
                 tick: 5,
-                mass_a: 1.25,
-                mass_b: 0.75,
+                mu: (1.25 * 0.75) / (1.25 + 0.75),
                 jn: 0.3,
             },
             Excitation {
                 tick: 40,
-                mass_a: 2.0,
-                mass_b: 1.5,
+                mu: (2.0 * 1.5) / (2.0 + 1.5),
                 jn: 0.05,
             },
         ];
@@ -145,8 +142,7 @@ mod tests {
         let pcm = synthesize(
             &[Excitation {
                 tick: 0,
-                mass_a: 1.0,
-                mass_b: 1.0,
+                mu: (1.0 * 1.0) / (1.0 + 1.0),
                 jn: 0.8,
             }],
             300,

@@ -24,11 +24,14 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, wav: Option<&Path>) {
     let mut pending: Vec<(u8, Action)> = Vec::new();
     let mut collapse_records: Vec<Record> = Vec::new();
     let mut multipole_records: Vec<Record> = Vec::new();
+    let mut radial_records: Vec<Record> = Vec::new();
     let mut contact_records: Vec<Record> = Vec::new();
     let mut pending_multipole = false;
+    let mut pending_radial = false;
     let mut body_index = 0usize;
     let mut last_tick = 0u64;
     let mut masses = vec![0.0f64; body_count as usize];
+    let mut collapse_mass = [0.0f64; 4];
     let mut stream_contacts: Vec<(u64, u32, u32, f64)> = Vec::new();
 
     while let Some(record) = reader.next_record().expect("golden parse failed") {
@@ -37,6 +40,8 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, wav: Option<&Path>) {
             Record::TickHeader { tick } => {
                 world.multipole = pending_multipole;
                 pending_multipole = false;
+                world.radial = world.radial || pending_radial;
+                pending_radial = false;
                 world.contacts = world.contacts || !contact_records.is_empty();
                 for &(region, action) in &pending {
                     world.schedule(world.tick + 1, region, action);
@@ -108,6 +113,26 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, wav: Option<&Path>) {
                         assert_eq!(qyy.to_bits(), tot.qyy.to_bits(), "{name}: multipole qyy");
                     }
                 }
+                for rec in radial_records.drain(..) {
+                    if let Record::RegionRadial {
+                        tick,
+                        region_x,
+                        region_y,
+                        binding,
+                    } = rec
+                    {
+                        assert_eq!(tick, world.tick, "{name}: RegionRadial tick");
+                        let region = (region_y * 2 + region_x) as u8;
+                        let tot = world
+                            .collapsed_totals(region)
+                            .expect("{name}: region radial at record");
+                        assert_eq!(
+                            binding.to_bits(),
+                            tot.binding.to_bits(),
+                            "{name}: radial binding"
+                        );
+                    }
+                }
                 body_index = 0;
                 last_tick = tick;
                 let local_contacts = std::mem::take(&mut world.last_contacts);
@@ -172,10 +197,36 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, wav: Option<&Path>) {
                 };
                 pending.push(((region_y * 2 + region_x) as u8, action));
             }
-            Record::RegionCollapsed { .. } => collapse_records.push(record),
+            Record::RegionCollapsed { .. } => {
+                if let Record::RegionCollapsed {
+                    region_x,
+                    region_y,
+                    mass,
+                    ..
+                } = record
+                {
+                    collapse_mass[(region_y * 2 + region_x) as usize] = mass;
+                }
+                collapse_records.push(record);
+            }
             Record::RegionMultipole { .. } => {
                 multipole_records.push(record);
                 pending_multipole = true;
+            }
+            Record::RegionRadial { .. } => {
+                radial_records.push(record);
+                pending_radial = true;
+            }
+            Record::ContactParams {
+                restitution,
+                friction,
+                walls,
+            } => {
+                assert!(!world.contact_params, "{name}: duplicate ContactParams");
+                world.contact_params = true;
+                world.restitution = restitution;
+                world.friction = friction;
+                world.walls = walls == 1;
             }
             Record::Contact { .. } => contact_records.push(record),
             Record::RegionState {
@@ -277,11 +328,18 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, wav: Option<&Path>) {
     if let Some(wav_path) = wav {
         let excitations: Vec<Excitation> = stream_contacts
             .iter()
-            .map(|&(tick, a, b, jn)| Excitation {
-                tick,
-                mass_a: masses[a as usize],
-                mass_b: masses[b as usize],
-                jn,
+            .map(|&(tick, a, b, jn)| {
+                let ma = masses[a as usize];
+                let mu = if b >= ontos_core::gravity::WALL_BASE {
+                    ma
+                } else if b >= ontos_core::gravity::MONOPOLE_BASE {
+                    let m = collapse_mass[(b - ontos_core::gravity::MONOPOLE_BASE) as usize];
+                    (ma * m) / (ma + m)
+                } else {
+                    let mb = masses[b as usize];
+                    (ma * mb) / (ma + mb)
+                };
+                Excitation { tick, mu, jn }
             })
             .collect();
         let pcm = audio::synthesize(&excitations, last_tick);
@@ -329,6 +387,31 @@ fn golden_gravity_collapse_observer() {
 #[test]
 fn golden_gravity_multipole() {
     verify_golden_gravity("g_multipole.stream", 17);
+}
+
+#[test]
+fn golden_gravity_radial() {
+    verify_golden_gravity("g_radial.stream", 17);
+}
+
+#[test]
+fn golden_gravity_walls() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    verify_golden_gravity_at(
+        &root.join("g_walls.stream"),
+        22,
+        Some(&root.join("g_walls.wav")),
+    );
+}
+
+#[test]
+fn golden_gravity_restitution() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    verify_golden_gravity_at(
+        &root.join("g_restitution.stream"),
+        11,
+        Some(&root.join("g_restitution.wav")),
+    );
 }
 
 #[test]

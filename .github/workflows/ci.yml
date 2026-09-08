@@ -30,6 +30,14 @@ jobs:
           cargo run -q --release --bin ontos -- --mode gravity --contacts --ticks 400 --seed 11 --bodies 32 --out /tmp/g_contact.stream --wav /tmp/g_contact.wav
           cmp /tmp/g_contact.stream core/tests/golden/g_contact.stream
           cmp /tmp/g_contact.wav core/tests/golden/g_contact.wav
+          cargo run -q --release --bin ontos -- --mode gravity --ticks 240 --seed 17 --bodies 12 --collapse-at 20 0 0 --expand-at 90 0 0 --collapse-at 91 0 0 --expand-at 160 0 0 --collapse-at 40 1 1 --expand-at 120 1 1 --demote-at 60 0 1 --radial --out /tmp/g_radial.stream
+          cmp /tmp/g_radial.stream core/tests/golden/g_radial.stream
+          cargo run -q --release --bin ontos -- --mode gravity --contacts --walls --ticks 600 --seed 22 --bodies 24 --collapse-at 5 0 1 --expand-at 200 0 1 --collapse-at 260 0 1 --out /tmp/g_walls.stream --wav /tmp/g_walls.wav
+          cmp /tmp/g_walls.stream core/tests/golden/g_walls.stream
+          cmp /tmp/g_walls.wav core/tests/golden/g_walls.wav
+          cargo run -q --release --bin ontos -- --mode gravity --contacts --restitution 0.5 --friction 0.25 --ticks 400 --seed 11 --bodies 32 --out /tmp/g_restitution.stream --wav /tmp/g_restitution.wav
+          cmp /tmp/g_restitution.stream core/tests/golden/g_restitution.stream
+          cmp /tmp/g_restitution.wav core/tests/golden/g_restitution.wav
           echo "bit-identical on ${{ matrix.os }}"
 
   cross-verify:
@@ -72,6 +80,11 @@ jobs:
           verify 300 17 --mode gravity --bodies 32 --contacts
           verify 400 11 --mode gravity --bodies 32 --contacts --collapse-at 100 0 0 --expand-at 250 0 0
           verify 300 7 --mode gravity --bodies 24 --contacts --demote-at 50 1 1 --promote-at 150 1 1
+          verify 240 17 --mode gravity --bodies 12 --collapse-at 20 0 0 --expand-at 90 0 0 --collapse-at 91 0 0 --expand-at 160 0 0 --collapse-at 40 1 1 --expand-at 120 1 1 --demote-at 60 0 1 --radial
+          verify 200 11 --mode gravity --bodies 10 --collapse-at 30 1 1 --expand-at 120 1 1 --radial
+          verify 600 22 --mode gravity --bodies 24 --contacts --walls --collapse-at 5 0 1 --expand-at 200 0 1 --collapse-at 260 0 1
+          verify 400 11 --mode gravity --bodies 32 --contacts --restitution 0.5 --friction 0.25
+          verify 300 13 --mode gravity --bodies 16 --contacts --walls --restitution 0.8 --friction 0.1
       - name: Cross-check modal audio with the Python reference (spec section 22)
         run: |
           set -e
@@ -80,3 +93,8 @@ jobs:
           HASH=$(echo "$LINE" | grep -o 'audio=[0-9a-f]*' | cut -d= -f2)
           PYTHONPATH=simval/src python3 -m simval.ontos_audio /tmp/contact.stream --wav /tmp/ref.wav --expect "$HASH"
           cmp /tmp/contact.wav /tmp/ref.wav
+          LINE=$(./target/release/ontos --mode gravity --contacts --walls --ticks 600 --seed 22 --bodies 24 --collapse-at 5 0 1 --expand-at 200 0 1 --collapse-at 260 0 1 --out /tmp/walls.stream --wav /tmp/walls.wav)
+          echo "$LINE"
+          HASH=$(echo "$LINE" | grep -o 'audio=[0-9a-f]*' | cut -d= -f2)
+          PYTHONPATH=simval/src python3 -m simval.ontos_audio /tmp/walls.stream --wav /tmp/ref_walls.wav --expect "$HASH"
+          cmp /tmp/walls.wav /tmp/ref_walls.wav

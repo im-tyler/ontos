@@ -81,6 +81,9 @@ fn verify_golden(name: &str, seed: u64) {
                     "{name}: region hash {region_x},{region_y} tick {ticks}"
                 );
             }
+            Record::RegionRadial { .. } | Record::ContactParams { .. } => {
+                panic!("{name}: version 2 record in a life stream");
+            }
         }
     }
 }

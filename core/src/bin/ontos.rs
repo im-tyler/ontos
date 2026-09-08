@@ -40,6 +40,10 @@ fn main() {
     let mut events: Vec<(u64, u8, Action)> = Vec::new();
     let mut observer_offset: Option<u64> = None;
     let mut contacts = false;
+    let mut radial = false;
+    let mut restitution: Option<f64> = None;
+    let mut friction: Option<f64> = None;
+    let mut walls = false;
     let mut wav: Option<PathBuf> = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -70,6 +74,31 @@ fn main() {
                 i += 2;
             }
             "--contacts" => {
+                contacts = true;
+                i += 1;
+            }
+            "--radial" => {
+                radial = true;
+                i += 1;
+            }
+            "--restitution" => {
+                let v: f64 = args[i + 1].parse().expect("invalid restitution");
+                if !(0.0..=1.0).contains(&v) {
+                    panic!("restitution out of range [0,1]: {v}");
+                }
+                restitution = Some(v);
+                i += 2;
+            }
+            "--friction" => {
+                let v: f64 = args[i + 1].parse().expect("invalid friction");
+                if v < 0.0 {
+                    panic!("friction out of range: {v}");
+                }
+                friction = Some(v);
+                i += 2;
+            }
+            "--walls" => {
+                walls = true;
                 contacts = true;
                 i += 1;
             }
@@ -126,12 +155,16 @@ fn main() {
                     "usage: ontos [--mode life|gravity] [--ticks N] [--seed S] [--bodies N] [--out FILE]\n\
                      life:    [--demote RX RY] [--promote RX RY]...\n\
                      gravity: [--demote-at T RX RY] [--promote-at T RX RY] [--collapse-at T RX RY]\n\
-                              [--expand-at T RX RY] [--observer OFFSET] [--contacts]\n\
-                              [--wav FILE]..."
+                              [--expand-at T RX RY] [--observer OFFSET] [--contacts] [--radial]\n\
+                              [--restitution E] [--friction F] [--walls] [--wav FILE]..."
                 );
                 std::process::exit(1);
             }
         }
+    }
+    if (restitution.is_some() || friction.is_some()) && !contacts {
+        eprintln!("--restitution/--friction require --contacts");
+        std::process::exit(1);
     }
 
     match mode {
@@ -144,6 +177,10 @@ fn main() {
             events,
             observer_offset,
             contacts,
+            radial,
+            restitution.unwrap_or(0.0),
+            friction.unwrap_or(0.0),
+            walls,
             wav,
         ),
     }
@@ -238,12 +275,24 @@ fn run_gravity(
     mut events: Vec<(u64, u8, Action)>,
     observer_offset: Option<u64>,
     contacts: bool,
+    radial: bool,
+    restitution: f64,
+    friction: f64,
+    walls: bool,
     wav: Option<PathBuf>,
 ) {
     events.sort();
     events.dedup();
     let mut world = GravityWorld::new(seed, bodies);
     world.contacts = contacts;
+    world.radial = radial;
+    let params = restitution != 0.0 || friction != 0.0 || walls;
+    if params {
+        world.contact_params = true;
+        world.restitution = restitution;
+        world.friction = friction;
+        world.walls = walls;
+    }
     for &(t, region, action) in &events {
         world.schedule(t, region, action);
     }
@@ -259,7 +308,17 @@ fn run_gravity(
         )
         .expect("failed to write stream header")
     });
-    let mut all_contacts: Vec<(u64, u32, u32, f64, f64, f64)> = Vec::new();
+    if let Some(w) = writer.as_mut() {
+        if params {
+            w.write(&Record::ContactParams {
+                restitution,
+                friction,
+                walls: if walls { 1 } else { 0 },
+            })
+            .expect("stream write failed");
+        }
+    }
+    let mut all_contacts: Vec<(u64, f64, f64)> = Vec::new();
     for _ in 0..ticks {
         let entering = world.tick + 1;
         if let Some(t) = world.events.get(&entering) {
@@ -278,11 +337,7 @@ fn run_gravity(
         }
         world.step();
         let tick_contacts = std::mem::take(&mut world.last_contacts);
-        all_contacts.extend(
-            tick_contacts
-                .iter()
-                .map(|c| (c.tick, c.a, c.b, c.jn, c.cx, c.cy)),
-        );
+        all_contacts.extend(tick_contacts.iter().map(|c| (c.tick, c.mu, c.jn)));
         if let Some(w) = writer.as_mut() {
             if let Some(observer) = world.observer.as_ref() {
                 for &(region, to_coarse) in &observer.policy_events {
@@ -323,6 +378,15 @@ fn run_gravity(
                     qyy: tot.qyy,
                 })
                 .expect("stream write failed");
+                if tot.radial {
+                    w.write(&Record::RegionRadial {
+                        tick: tot.tick,
+                        region_x: (tot.region % 2) as u32,
+                        region_y: (tot.region / 2) as u32,
+                        binding: tot.binding,
+                    })
+                    .expect("stream write failed");
+                }
             }
             for c in &tick_contacts {
                 w.write(&Record::Contact {
@@ -388,12 +452,7 @@ fn run_gravity(
     if wav.is_some() || contacts {
         let excitations: Vec<Excitation> = all_contacts
             .iter()
-            .map(|&(tick, a, b, jn, _, _)| Excitation {
-                tick,
-                mass_a: world.bodies[a as usize].mass,
-                mass_b: world.bodies[b as usize].mass,
-                jn,
-            })
+            .map(|&(tick, mu, jn)| Excitation { tick, mu, jn })
             .collect();
         let pcm = audio::synthesize(&excitations, world.tick);
         if let Some(path) = &wav {

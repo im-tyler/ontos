@@ -62,7 +62,26 @@ perfectly inelastic, frictionless body-body contact between fine bodies
 conserved by axiom), Contact records in the stream, and audio as a pure
 function of the stream (section 22: contact-excited damped resonators,
 65536 Hz mono PCM16 WAV, FNV audio hash) — bit-verified by three
-implementations including the synthesized samples.
+implementations including the synthesized samples. Section 23
+(2026-09-08): radial-shape synthesis — every collapse in radial mode
+additionally freezes its binding (the exact internal potential
+statistic, RegionRadial record); expansion scales the section 20
+displacements by a bisection-solved radial factor that closes the
+synthesized internal potential on the record, plus a closed-form
+spread scale that closes the synthesized kinetic energy on the recorded
+total, driving the synthesized-set energy delta from O(1) to rounding
+(measured 0.14-0.57 relative down to ~1e-14; dipole stays exact,
+quadrupole reported and bounded <= 4.0 instead of exact — the honest
+cost of pinning pair distances). Section 24 (2026-09-08): contact
+extensions — restitution and Coulomb-clamped friction (ContactParams
+record, tag 12), one-sided static impulses against frozen contactants
+(ephemeris-coarse bodies, collapsed-region monopoles as disks of mass M
+at com with the section 21 radius law, walls at the managed extent
+[x=0, x=128, y=0, y=128]) named by pseudo body ids in Contact records;
+fine-fine impulses still conserve the ledger exactly by axiom, static
+impulses book it exactly like fc kicks (measured: all-fine e/friction
+runs keep the ledger bit-exact; wall/monopole runs track the applied
+impulses). Streams without the new records verify as sections 13-22.
 See [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Determinism contract
@@ -82,4 +101,5 @@ Golden-stream regression corpus lives in `core/tests/golden/`; the CLI is
 `cargo run --bin ontos -- --ticks N --seed S [--demote RX RY] [--promote RX RY]
 [--out FILE]` (life) or `--mode gravity [--bodies N] [--demote-at T RX RY]
 [--promote-at T RX RY] [--collapse-at T RX RY] [--expand-at T RX RY]
-[--observer OFFSET] [--contacts] [--wav FILE] [--out FILE]`.
+[--observer OFFSET] [--contacts] [--radial] [--restitution E] [--friction F]
+[--walls] [--wav FILE] [--out FILE]`.
