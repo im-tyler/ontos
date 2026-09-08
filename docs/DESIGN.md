@@ -105,12 +105,24 @@ The physics engine is not a dependency of this project. It is the product.
   no collisions yet.
 - **Phase 4 — reconstruction:** v1 experiment DONE 2026-09-07 (spec
   section 19: collapse to totals-only monopole + deterministic
-  reconstruction on expansion with exact momentum residual). Verified
-  bit-exact by three implementations; simval bounds reconstruction error
-  (post-expansion deviation ~10-12 on goldens, tolerance 64; ledger drift
-  < 1e-2) and the orchestrator sweeps parameter grids with MAD-outlier
-  detection. Open: collapse-on-coarse composition semantics, tighter
-  reconstruction (constrained synthesis beyond monopole+residual).
+  reconstruction on expansion with exact momentum residual). v2 DONE
+  2026-09-07 (spec section 20: multipole reconstruction — the collapse
+  record set gains RegionMultipole (dipole accumulators + quadrupole
+  tensor); expansion closes the synthesized set's mass-weighted
+  position sum on the dipole exactly by residual, and matches the
+  quadrupole tensor to rounding by Cholesky whitening/coloring of the
+  frozen jitter; gravity during collapse stays monopole). Verified
+  bit-exact by three implementations; simval bounds the invariants
+  (dipole 0.0 relative, quadrupole ~1e-15, tolerance 1e-9;
+  post-expansion deviation stays region-scale, < 40 across seeds vs
+  tolerance 64; ledger drift < 1e-2) and the synthesized-set energy
+  delta improves 2-20x over section 19. Section 19 streams remain
+  valid input (mode selected per collapse cycle by record presence).
+  The orchestrator sweeps parameter grids with MAD-outlier detection
+  including the multipole metrics. Open: collapse-on-coarse composition
+  semantics, octupole-and-beyond constrained synthesis, radial
+  distribution shape (energy delta still O(1) — tensor match does not
+  pin pair distances).
 
 ## Non-goals
 

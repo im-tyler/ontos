@@ -46,8 +46,17 @@ Phase 2 closed 2026-09-07 (REBOUND anchor < 1e-4; zoom policy verified
 in-stream). Phase 3 viewer v1: light-system `ontos_view` plays back
 gravity streams. Phase 4 v1 (section 19): collapse-to-monopole with
 deterministic reconstruction on expansion — bit-verified by three
-implementations, error-bounded by simval. See
-[docs/DESIGN.md](docs/DESIGN.md).
+implementations, error-bounded by simval. Phase 4 v2 (section 20,
+2026-09-07): multipole reconstruction — every collapse additionally
+freezes the dipole (mass-weighted position sums) and quadrupole (second
+central moments) in a RegionMultipole record; expansion synthesizes
+positions that close on the dipole exactly by residual and match the
+quadrupole to rounding via a deterministic Cholesky whitening/coloring
+transform of the frozen jitter (measured: dipole 0.0 relative,
+quadrupole ~1e-15; synthesized-set energy delta improves 2-20x over
+section 19; post-expansion deviation stays region-scale, < 40 measured,
+tolerance 64). Section 19 streams (no multipole record) still verify.
+See [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Determinism contract
 
