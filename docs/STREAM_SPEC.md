@@ -410,3 +410,94 @@ Normative clarifications (implementation-consensus 2026-09-07):
 CLI: `--collapse-at T RX RY` and `--expand-at T RX RY` schedule the
 events; the CLI emits RegionLevel records (level 2 for collapse) and the
 RegionCollapsed record at the collapse boundary, before the TickHeader.
+
+## 20. Phase 4 v2: multipole reconstruction (version 2)
+
+Section 19 reconstructs positions from the monopole only: com plus raw
+jitter, with no constraint on the synthesized set's center of mass or
+spread. This section tightens reconstruction beyond the monopole: the
+synthesized set matches the collapsed set's dipole (mass-weighted
+position sum) exactly by residual, and its quadrupole (mass-weighted
+second central moments) to rounding, by a deterministic linear transform
+of the frozen jitter. The gravity behavior of a collapsed region is
+unchanged (still a monopole at com); only the expansion synthesis
+changes. All arithmetic stays in the section 11 closure with fixed
+summation orders; every conforming implementation produces
+bit-identical synthesized states.
+
+- New record, emitted immediately after every RegionCollapsed record at
+  the same boundary:
+  tag 9 RegionMultipole: u64 tick, u32 region_x, u32 region_y,
+    f64 mx, f64 my, f64 qxx, f64 qxy, f64 qyy
+  Payload is 56 bytes plus the tag byte (8+4+4+40). For an empty
+  collapse (N=0) all five floats are zero. The reference CLI emits this
+  record for every collapse; streams whose collapses carry no
+  RegionMultipole record are section 19 streams and reconstruct per
+  section 19 (a verifier selects the expansion mode per collapse cycle
+  from the presence of this record).
+
+- Totals at collapse (all sums left-to-right over the section 19 member
+  list in id order, from the same materialized states that produced the
+  RegionCollapsed record):
+  mx = sum m_i * x_i;  my = sum m_i * y_i
+  (these are the exact accumulators that produced com = mx / mass)
+  with com_x = mx / mass, com_y = my / mass:
+  dx_i = x_i - com_x;  dy_i = y_i - com_y
+  qxx = sum m_i * dx_i * dx_i;  qxy = sum m_i * dx_i * dy_i;
+  qyy = sum m_i * dy_i * dy_i
+
+- Expansion of a collapse cycle that carries a RegionMultipole record:
+  the draw sequence is identical to section 19 (jitter 2 draws per body
+  in id order, then spread 2 draws per body for bodies 0..N-2; the
+  residual body draws nothing). Velocities are synthesized exactly as
+  section 19 (v_i = v_com + s_i for i < N-1; the last body absorbs the
+  momentum residual). Positions are synthesized per this section.
+
+  Dipole residual (always applied, any N >= 1): given base
+  displacements (bx_i, by_i) from the transform step below (or the raw
+  jitter when the transform is skipped), positions are
+  x_i = com_x + bx_i, y_i = com_y + by_i for i < N-1;
+  Sx = sum_{i<N-1} m_i * x_i (left-to-right, id order); same Sy;
+  x_{N-1} = (mx - Sx) / m_{N-1};  y_{N-1} = (my - Sy) / m_{N-1}.
+  This mirrors the section 19 momentum residual: the synthesized set's
+  mass-weighted position sum closes on (mx, my) to rounding.
+
+  Quadrupole transform (applied only when N >= 3):
+  - Recenter the raw jitter: wx = (sum_i m_i * jx_i) / mass and
+    wy = (sum_i m_i * jy_i) / mass (sums over all members, id order,
+    mass = the RegionCollapsed mass field); dhat_x_i = jx_i - wx,
+    dhat_y_i = jy_i - wy.
+  - Jitter second moments (id order): jxx = sum m_i * dhat_x_i^2,
+    jxy = sum m_i * dhat_x_i * dhat_y_i, jyy = sum m_i * dhat_y_i^2.
+  - Cholesky guards, evaluated in this order; if any fails the
+    transform is skipped (base displacements = raw jitter):
+    lj00 = sqrt(jxx) requires jxx > 0.0;
+    lj10 = jxy / lj00;  jjd = jyy - lj10 * lj10 requires jjd > 0.0;
+    lq00 = sqrt(qxx) requires qxx > 0.0;
+    lq10 = qxy / lq00;  qqd = qyy - lq10 * lq10 requires qqd > 0.0.
+  - Inverse factor entries: u00 = 1.0 / lj00; u11 = 1.0 / lj11 where
+    lj11 = sqrt(jjd); u10 = -(lj10 / (lj00 * lj11)).
+  - Transform A = L_Q * L_J^{-1} (both lower-triangular, so A is
+    lower-triangular):
+    a00 = lq00 * u00;  a11 = lq11 * u11 where lq11 = sqrt(qqd);
+    a10 = lq10 * u00 + lq11 * u10.
+  - Base displacements: bx_i = a00 * dhat_x_i;
+    by_i = a10 * dhat_x_i + a11 * dhat_y_i.
+    In exact arithmetic sum m_i * (bx_i, by_i)(bx_i, by_i)^T equals the
+    recorded quadrupole (A J A^T = Q); in floating point it matches to
+    rounding.
+
+  Body states while collapsed (before expansion) are unchanged from
+  section 19: com plus the raw frozen jitter. The transform exists only
+  at the expansion boundary.
+
+- Hashes and totals: unchanged; the synthesized expansion states enter
+  body/region/world hashes and totals exactly as emitted.
+
+- Verification: bit-match the RegionMultipole fields against locally
+  computed values, plus (check framework, not format): the synthesized
+  set's mass-weighted position sum closes on (mx, my), and its second
+  central moments (computed with the same dx_i = x_i - com_x formulas
+  against the record's com) close on (qxx, qxy, qyy). Tolerances live
+  in the verifier's check framework. Post-expansion deviation vs an
+  all-fine reference remains a verifier-owned bound (section 19).
