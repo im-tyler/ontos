@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fnv1a64;
 
@@ -9,6 +9,7 @@ pub const WINDOW: u64 = 32;
 pub const DEGREE: usize = 8;
 pub const SAMPLES: usize = 33;
 pub const UNMANAGED: u8 = 255;
+pub const CONTACT_R: f64 = 2.0;
 
 pub struct SplitMix64 {
     state: u64,
@@ -100,6 +101,17 @@ pub struct CollapseTotals {
     pub qyy: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactEvent {
+    pub tick: u64,
+    pub a: u32,
+    pub b: u32,
+    pub jn: f64,
+    pub cx: f64,
+    pub cy: f64,
+    pub vn_after: f64,
+}
+
 pub struct Observer {
     rng: SplitMix64,
     points: Vec<(f64, f64)>,
@@ -169,6 +181,9 @@ pub struct GravityWorld {
     pub observer: Option<Observer>,
     pub multipole: bool,
     pub last_expansion: Vec<Body>,
+    pub contacts: bool,
+    pub touching: BTreeSet<(u32, u32)>,
+    pub last_contacts: Vec<ContactEvent>,
 }
 
 pub fn initial_conditions(seed: u64, count: u32) -> Vec<Body> {
@@ -227,6 +242,9 @@ impl GravityWorld {
             observer: None,
             multipole: true,
             last_expansion: Vec::new(),
+            contacts: false,
+            touching: BTreeSet::new(),
+            last_contacts: Vec::new(),
         }
     }
 
@@ -775,7 +793,81 @@ impl GravityWorld {
                 self.py += self.bodies[i].mass * (ay_fc[i] * half);
             }
         }
+        if self.contacts {
+            self.contact_pass(entering, &kind);
+        }
         self.tick = entering;
+    }
+
+    fn contact_pass(&mut self, entering: u64, kind: &[u8]) {
+        let n = self.bodies.len();
+        let radii: Vec<f64> = self
+            .bodies
+            .iter()
+            .map(|b| CONTACT_R * b.mass.sqrt())
+            .collect();
+        let mut next = BTreeSet::new();
+        let mut events = Vec::new();
+        for i in 0..n {
+            if kind[i] != 0 {
+                continue;
+            }
+            for j in (i + 1)..n {
+                if kind[j] != 0 {
+                    continue;
+                }
+                let dx = self.bodies[j].x - self.bodies[i].x;
+                let dy = self.bodies[j].y - self.bodies[i].y;
+                let rs = radii[i] + radii[j];
+                let d2 = dx * dx + dy * dy;
+                if d2 >= rs * rs {
+                    continue;
+                }
+                let pair = (i as u32, j as u32);
+                next.insert(pair);
+                let (nx, ny) = if d2 == 0.0 {
+                    (1.0, 0.0)
+                } else {
+                    let dist = d2.sqrt();
+                    (dx / dist, dy / dist)
+                };
+                let vrx = self.bodies[j].vx - self.bodies[i].vx;
+                let vry = self.bodies[j].vy - self.bodies[i].vy;
+                let vn = vrx * nx + vry * ny;
+                if vn >= 0.0 {
+                    continue;
+                }
+                let mi = self.bodies[i].mass;
+                let mj = self.bodies[j].mass;
+                let cx = (self.bodies[i].x + self.bodies[j].x) * 0.5;
+                let cy = (self.bodies[i].y + self.bodies[j].y) * 0.5;
+                let inv = 1.0 / (mi + mj);
+                let t = vn * inv;
+                let fi = t * mj;
+                let fj = t * mi;
+                self.bodies[i].vx += fi * nx;
+                self.bodies[i].vy += fi * ny;
+                self.bodies[j].vx -= fj * nx;
+                self.bodies[j].vy -= fj * ny;
+                if self.touching.contains(&pair) {
+                    continue;
+                }
+                let vn_after = (self.bodies[j].vx - self.bodies[i].vx) * nx
+                    + (self.bodies[j].vy - self.bodies[i].vy) * ny;
+                let mu = (mi * mj) / (mi + mj);
+                events.push(ContactEvent {
+                    tick: entering,
+                    a: i as u32,
+                    b: j as u32,
+                    jn: -vn * mu,
+                    cx,
+                    cy,
+                    vn_after,
+                });
+            }
+        }
+        self.touching = next;
+        self.last_contacts.extend(events);
     }
 
     pub fn totals(&self) -> (u64, u64, f64, f64, f64, f64) {
@@ -1287,6 +1379,112 @@ mod tests {
             hashes
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn contact_replay_bit_identical() {
+        let run = || {
+            let mut w = GravityWorld::new(11, 32);
+            w.contacts = true;
+            w.schedule(80, 2, Action::Demote);
+            w.schedule(200, 2, Action::Promote);
+            w.schedule(100, 0, Action::Collapse);
+            w.schedule(250, 0, Action::Promote);
+            let mut hashes = Vec::new();
+            for _ in 0..400 {
+                w.step();
+                hashes.push(w.world_hash());
+                w.last_contacts.clear();
+            }
+            hashes
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn contact_ledger_exactly_conserved_all_fine() {
+        let mut w = GravityWorld::new(11, 32);
+        w.contacts = true;
+        let (_, _, _, px0, py0, _) = w.totals();
+        for _ in 0..300 {
+            w.step();
+            w.last_contacts.clear();
+        }
+        let (_, _, _, px1, py1, _) = w.totals();
+        assert_eq!((px0, py0), (px1, py1));
+    }
+
+    #[test]
+    fn contact_impulse_stops_approach_and_records_positive() {
+        let mut w = GravityWorld::new(11, 32);
+        w.contacts = true;
+        let mut records = 0u64;
+        let mut worst_vn_after = 0.0f64;
+        for _ in 0..400 {
+            w.step();
+            for c in &w.last_contacts {
+                assert!(c.jn > 0.0, "jn must be positive: {}", c.jn);
+                worst_vn_after = worst_vn_after.max(c.vn_after.abs());
+                records += 1;
+            }
+            w.last_contacts.clear();
+        }
+        assert!(records >= 3, "expected several contacts, got {records}");
+        assert!(
+            worst_vn_after < 1e-12,
+            "resolving pairs close on zero approach: {worst_vn_after}"
+        );
+    }
+
+    #[test]
+    fn contact_physical_momentum_drifts_only_by_rounding() {
+        let mut w = GravityWorld::new(11, 32);
+        w.contacts = true;
+        let sum_mv = |w: &GravityWorld| {
+            let mut px = 0.0;
+            let mut py = 0.0;
+            for b in &w.bodies {
+                px += b.mass * b.vx;
+                py += b.mass * b.vy;
+            }
+            (px, py)
+        };
+        let (px0, py0) = sum_mv(&w);
+        let ledger0 = (w.px, w.py);
+        for _ in 0..200 {
+            w.step();
+            w.last_contacts.clear();
+        }
+        let (px1, py1) = sum_mv(&w);
+        assert_eq!((w.px, w.py), ledger0, "ledger untouched by contacts");
+        let scale = px0.abs().max(py0.abs()).max(1e-30);
+        let drift = (px1 - px0).abs().max((py1 - py0).abs()) / scale;
+        assert!(drift < 1e-12, "physical momentum drift {drift}");
+    }
+
+    #[test]
+    fn contacts_off_matches_spec_history_bit_for_bit() {
+        let off = {
+            let mut w = GravityWorld::new(1, 8);
+            let mut hashes = Vec::new();
+            for _ in 0..300 {
+                w.step();
+                hashes.push(w.world_hash());
+            }
+            hashes
+        };
+        let on_no_contact = {
+            let mut w = GravityWorld::new(1, 8);
+            w.contacts = true;
+            let mut hashes = Vec::new();
+            for _ in 0..300 {
+                w.step();
+                hashes.push(w.world_hash());
+                w.last_contacts.clear();
+            }
+            hashes
+        };
+        assert_eq!(off, on_no_contact);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::path::Path;
 
+use ontos_core::audio::{self, Excitation};
 use ontos_core::gravity::{Action, GravityWorld};
 use ontos_stream::{Record, StreamReader};
 
@@ -8,7 +9,12 @@ fn verify_golden_gravity(name: &str, seed: u64) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
         .join(name);
-    let input = File::open(&path).expect("golden stream missing");
+    verify_golden_gravity_at(&path, seed, None);
+}
+
+fn verify_golden_gravity_at(path: &Path, seed: u64, wav: Option<&Path>) {
+    let name = path.file_name().unwrap().to_string_lossy();
+    let input = File::open(path).expect("golden stream missing");
     let mut reader = StreamReader::new(input).expect("bad golden header");
     let body_count = reader
         .body_count()
@@ -18,9 +24,12 @@ fn verify_golden_gravity(name: &str, seed: u64) {
     let mut pending: Vec<(u8, Action)> = Vec::new();
     let mut collapse_records: Vec<Record> = Vec::new();
     let mut multipole_records: Vec<Record> = Vec::new();
+    let mut contact_records: Vec<Record> = Vec::new();
     let mut pending_multipole = false;
     let mut body_index = 0usize;
     let mut last_tick = 0u64;
+    let mut masses = vec![0.0f64; body_count as usize];
+    let mut stream_contacts: Vec<(u64, u32, u32, f64)> = Vec::new();
 
     while let Some(record) = reader.next_record().expect("golden parse failed") {
         match record {
@@ -28,6 +37,7 @@ fn verify_golden_gravity(name: &str, seed: u64) {
             Record::TickHeader { tick } => {
                 world.multipole = pending_multipole;
                 pending_multipole = false;
+                world.contacts = world.contacts || !contact_records.is_empty();
                 for &(region, action) in &pending {
                     world.schedule(world.tick + 1, region, action);
                 }
@@ -100,6 +110,47 @@ fn verify_golden_gravity(name: &str, seed: u64) {
                 }
                 body_index = 0;
                 last_tick = tick;
+                let local_contacts = std::mem::take(&mut world.last_contacts);
+                assert_eq!(
+                    contact_records.len(),
+                    local_contacts.len(),
+                    "{name}: contact count at tick {tick}"
+                );
+                for rec in contact_records.drain(..) {
+                    if let Record::Contact {
+                        tick,
+                        body_a,
+                        body_b,
+                        jn,
+                        cx,
+                        cy,
+                    } = rec
+                    {
+                        stream_contacts.push((tick, body_a, body_b, jn));
+                        let local = local_contacts
+                            .iter()
+                            .find(|c| c.a == body_a && c.b == body_b)
+                            .unwrap_or_else(|| {
+                                panic!("{name}: contact ({body_a},{body_b}) not computed")
+                            });
+                        assert_eq!(tick, local.tick, "{name}: Contact tick");
+                        assert_eq!(
+                            jn.to_bits(),
+                            local.jn.to_bits(),
+                            "{name}: contact ({body_a},{body_b}) jn"
+                        );
+                        assert_eq!(
+                            cx.to_bits(),
+                            local.cx.to_bits(),
+                            "{name}: contact ({body_a},{body_b}) cx"
+                        );
+                        assert_eq!(
+                            cy.to_bits(),
+                            local.cy.to_bits(),
+                            "{name}: contact ({body_a},{body_b}) cy"
+                        );
+                    }
+                }
             }
             Record::Snapshot { population } => {
                 assert_eq!(
@@ -126,6 +177,7 @@ fn verify_golden_gravity(name: &str, seed: u64) {
                 multipole_records.push(record);
                 pending_multipole = true;
             }
+            Record::Contact { .. } => contact_records.push(record),
             Record::RegionState {
                 tick,
                 region_x,
@@ -152,6 +204,7 @@ fn verify_golden_gravity(name: &str, seed: u64) {
                 vy,
                 mass,
             } => {
+                masses[body_id as usize] = mass;
                 let (b, w_region, w_level) = world.emitted_state(body_index);
                 assert_eq!(tick, world.tick, "{name}: BodyState tick");
                 assert_eq!(body_id, b.id, "{name}: body id order");
@@ -221,6 +274,21 @@ fn verify_golden_gravity(name: &str, seed: u64) {
         "{name}: emitted all body records"
     );
     assert_eq!(last_tick, world.tick, "{name}: final tick");
+    if let Some(wav_path) = wav {
+        let excitations: Vec<Excitation> = stream_contacts
+            .iter()
+            .map(|&(tick, a, b, jn)| Excitation {
+                tick,
+                mass_a: masses[a as usize],
+                mass_b: masses[b as usize],
+                jn,
+            })
+            .collect();
+        let pcm = audio::synthesize(&excitations, last_tick);
+        let bytes = audio::wav_bytes(&pcm);
+        let want = std::fs::read(wav_path).expect("golden wav missing");
+        assert_eq!(bytes, want, "{name}: synthesized wav matches golden");
+    }
 }
 
 #[test]
@@ -261,4 +329,14 @@ fn golden_gravity_collapse_observer() {
 #[test]
 fn golden_gravity_multipole() {
     verify_golden_gravity("g_multipole.stream", 17);
+}
+
+#[test]
+fn golden_gravity_contact() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    verify_golden_gravity_at(
+        &root.join("g_contact.stream"),
+        11,
+        Some(&root.join("g_contact.wav")),
+    );
 }

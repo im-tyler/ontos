@@ -27,6 +27,9 @@ jobs:
           cmp /tmp/mixed.stream core/tests/golden/mixed.stream
           OUT=$(cargo run -q --release --bin ontos -- --ticks 200 --seed 7 --demote 1 0 --demote 0 1 --promote 1 0)
           [ "$OUT" = "seed=7 ticks=200 population=4 hash=0e0e9764dad3ab42" ]
+          cargo run -q --release --bin ontos -- --mode gravity --contacts --ticks 400 --seed 11 --bodies 32 --out /tmp/g_contact.stream --wav /tmp/g_contact.wav
+          cmp /tmp/g_contact.stream core/tests/golden/g_contact.stream
+          cmp /tmp/g_contact.wav core/tests/golden/g_contact.wav
           echo "bit-identical on ${{ matrix.os }}"
 
   cross-verify:
@@ -65,3 +68,15 @@ jobs:
           verify 300 13 --mode gravity --bodies 12 --observer 42 --collapse-at 40 0 0
           verify 240 17 --mode gravity --bodies 12 --collapse-at 20 0 0 --expand-at 90 0 0 --collapse-at 91 0 0 --expand-at 160 0 0 --collapse-at 40 1 1 --expand-at 120 1 1 --demote-at 60 0 1
           verify 160 19 --mode gravity --bodies 6 --collapse-at 15 1 1 --expand-at 60 1 1 --collapse-at 30 0 0 --expand-at 100 0 0
+          verify 400 11 --mode gravity --bodies 32 --contacts
+          verify 300 17 --mode gravity --bodies 32 --contacts
+          verify 400 11 --mode gravity --bodies 32 --contacts --collapse-at 100 0 0 --expand-at 250 0 0
+          verify 300 7 --mode gravity --bodies 24 --contacts --demote-at 50 1 1 --promote-at 150 1 1
+      - name: Cross-check modal audio with the Python reference (spec section 22)
+        run: |
+          set -e
+          LINE=$(./target/release/ontos --mode gravity --contacts --ticks 400 --seed 11 --bodies 32 --out /tmp/contact.stream --wav /tmp/contact.wav)
+          echo "$LINE"
+          HASH=$(echo "$LINE" | grep -o 'audio=[0-9a-f]*' | cut -d= -f2)
+          PYTHONPATH=simval/src python3 -m simval.ontos_audio /tmp/contact.stream --wav /tmp/ref.wav --expect "$HASH"
+          cmp /tmp/contact.wav /tmp/ref.wav

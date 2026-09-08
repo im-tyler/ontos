@@ -71,7 +71,8 @@ its own deterministic solvers, one per phenomenon, swapped by scale:
 
 - Phase 0: none (game of life — rules, not physics)
 - Phase 2: gravity (Chebyshev far field + integrator near field)
-- Later: SPH/XPBD-informed solvers for continuum and contact, reading
+- Phase 5: contact v1 (impulsive inelastic pairwise resolution, section 21)
+- Later: SPH/XPBD-informed solvers for continuum, reading
   material from the godot-parity-archive cascade prototypes
 
 The physics engine is not a dependency of this project. It is the product.
@@ -101,8 +102,27 @@ The physics engine is not a dependency of this project. It is the product.
   region/level, region grid, playback controls, validation-clean, and a
   `--frames` headless smoke mode. `tools/ontos/ontos_stream_dump.cpp`
   remains the third bit-exact spec implementation. Audio (modal
-  synthesis from contact events) waits for contact physics; bodies have
-  no collisions yet.
+  synthesis from contact events) landed with contact physics (sections
+  21-22); the v1 output path is a deterministic offline WAV render.
+- **Phase 5 — contact + audio:** v1 DONE 2026-09-07 (spec sections 21-22).
+  Contact: impulsive, perfectly inelastic, frictionless body-body
+  resolution between fine bodies — one pinned lexicographic pass per
+  tick after the second kick, no iteration count, no tolerance, every
+  operand order pinned; radii are a pure function of mass. Contact
+  records (tag 10) mark contact beginnings only; resting contact
+  re-resolves silently each tick. The momentum ledger is untouched by
+  contact impulses (fine-fine axiom; measured physical drift < 1e-11
+  relative). Audio: a pure function of the stream (section 22) —
+  contact impulses excite three damped resonators per event (65536 Hz
+  = 64 samples per 2^-10 tick, mono PCM16 WAV; recurrence-based
+  synthesis in the +,-,*,/ closure — no libm transcendentals — so
+  consumers are bit-identical cross-platform; FNV-1a64 hash over the
+  PCM bytes). Verified bit-exact by three implementations (Rust CLI
+  `--wav`, simval `python3 -m simval.ontos_audio`, light-system
+  `ontos_stream_dump`/`ontos_view --wav`). Open: friction/restitution
+  parameters, body-boundary contact (the v2 world is the unbounded
+  plane — there is no boundary yet), contact between coarse/collapsed
+  modes, spatialized audio.
 - **Phase 4 — reconstruction:** v1 experiment DONE 2026-09-07 (spec
   section 19: collapse to totals-only monopole + deterministic
   reconstruction on expansion with exact momentum residual). v2 DONE

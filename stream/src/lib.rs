@@ -76,6 +76,14 @@ pub enum Record {
         qxy: f64,
         qyy: f64,
     },
+    Contact {
+        tick: u64,
+        body_a: u32,
+        body_b: u32,
+        jn: f64,
+        cx: f64,
+        cy: f64,
+    },
 }
 
 pub struct StreamWriter<W: Write> {
@@ -231,6 +239,22 @@ impl<W: Write> StreamWriter<W> {
                 self.out.write_all(&qxx.to_le_bytes())?;
                 self.out.write_all(&qxy.to_le_bytes())?;
                 self.out.write_all(&qyy.to_le_bytes())
+            }
+            Record::Contact {
+                tick,
+                body_a,
+                body_b,
+                jn,
+                cx,
+                cy,
+            } => {
+                self.out.write_all(&[10u8])?;
+                self.out.write_all(&tick.to_le_bytes())?;
+                self.out.write_all(&body_a.to_le_bytes())?;
+                self.out.write_all(&body_b.to_le_bytes())?;
+                self.out.write_all(&jn.to_le_bytes())?;
+                self.out.write_all(&cx.to_le_bytes())?;
+                self.out.write_all(&cy.to_le_bytes())
             }
         }
     }
@@ -446,6 +470,17 @@ impl<R: Read> StreamReader<R> {
                     qxx: f64::from_le_bytes(self.scratch[32..40].try_into().unwrap()),
                     qxy: f64::from_le_bytes(self.scratch[40..48].try_into().unwrap()),
                     qyy: f64::from_le_bytes(self.scratch[48..56].try_into().unwrap()),
+                }
+            }
+            10 => {
+                self.take(40)?;
+                Record::Contact {
+                    tick: u64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
+                    body_a: u32::from_le_bytes(self.scratch[8..12].try_into().unwrap()),
+                    body_b: u32::from_le_bytes(self.scratch[12..16].try_into().unwrap()),
+                    jn: f64::from_le_bytes(self.scratch[16..24].try_into().unwrap()),
+                    cx: f64::from_le_bytes(self.scratch[24..32].try_into().unwrap()),
+                    cy: f64::from_le_bytes(self.scratch[32..40].try_into().unwrap()),
                 }
             }
             t => return Err(ParseError::UnknownTag(t)),
@@ -791,6 +826,30 @@ mod tests {
         assert_eq!(buf.len(), 21 + 56);
         let mut r = StreamReader::new(&buf[..]).unwrap();
         assert_eq!(r.body_count(), Some(10));
+        assert_eq!(r.next_record().unwrap(), Some(rec));
+        assert_eq!(r.next_record().unwrap(), None);
+    }
+
+    #[test]
+    fn contact_roundtrip_gravity() {
+        let mut buf = Vec::new();
+        let rec = Record::Contact {
+            tick: 17,
+            body_a: 3,
+            body_b: 9,
+            jn: 0.125,
+            cx: 80.5,
+            cy: -12.25,
+        };
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 12).unwrap();
+            w.write(&rec).unwrap();
+            w.flush().unwrap();
+        }
+        assert_eq!(buf[20], 10);
+        assert_eq!(buf.len(), 21 + 40);
+        let mut r = StreamReader::new(&buf[..]).unwrap();
+        assert_eq!(r.body_count(), Some(12));
         assert_eq!(r.next_record().unwrap(), Some(rec));
         assert_eq!(r.next_record().unwrap(), None);
     }

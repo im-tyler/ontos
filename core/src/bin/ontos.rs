@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::path::PathBuf;
 
+use ontos_core::audio::{self, Excitation};
 use ontos_core::gravity::{Action, GravityWorld};
 use ontos_core::{Level, World};
 use ontos_stream::{Record, StreamWriter};
@@ -38,6 +39,8 @@ fn main() {
     let mut bodies: u32 = 8;
     let mut events: Vec<(u64, u8, Action)> = Vec::new();
     let mut observer_offset: Option<u64> = None;
+    let mut contacts = false;
+    let mut wav: Option<PathBuf> = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -64,6 +67,14 @@ fn main() {
                     "gravity" => Mode::Gravity,
                     other => panic!("unknown mode {other}"),
                 };
+                i += 2;
+            }
+            "--contacts" => {
+                contacts = true;
+                i += 1;
+            }
+            "--wav" => {
+                wav = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
             "--demote" => {
@@ -115,7 +126,8 @@ fn main() {
                     "usage: ontos [--mode life|gravity] [--ticks N] [--seed S] [--bodies N] [--out FILE]\n\
                      life:    [--demote RX RY] [--promote RX RY]...\n\
                      gravity: [--demote-at T RX RY] [--promote-at T RX RY] [--collapse-at T RX RY]\n\
-                              [--expand-at T RX RY] [--observer OFFSET]..."
+                              [--expand-at T RX RY] [--observer OFFSET] [--contacts]\n\
+                              [--wav FILE]..."
                 );
                 std::process::exit(1);
             }
@@ -124,7 +136,16 @@ fn main() {
 
     match mode {
         Mode::Life => run_life(ticks, seed, out, demote, promote),
-        Mode::Gravity => run_gravity(ticks, seed, out, bodies, events, observer_offset),
+        Mode::Gravity => run_gravity(
+            ticks,
+            seed,
+            out,
+            bodies,
+            events,
+            observer_offset,
+            contacts,
+            wav,
+        ),
     }
 }
 
@@ -208,6 +229,7 @@ fn run_life(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_gravity(
     ticks: u64,
     seed: u64,
@@ -215,10 +237,13 @@ fn run_gravity(
     bodies: u32,
     mut events: Vec<(u64, u8, Action)>,
     observer_offset: Option<u64>,
+    contacts: bool,
+    wav: Option<PathBuf>,
 ) {
     events.sort();
     events.dedup();
     let mut world = GravityWorld::new(seed, bodies);
+    world.contacts = contacts;
     for &(t, region, action) in &events {
         world.schedule(t, region, action);
     }
@@ -234,6 +259,7 @@ fn run_gravity(
         )
         .expect("failed to write stream header")
     });
+    let mut all_contacts: Vec<(u64, u32, u32, f64, f64, f64)> = Vec::new();
     for _ in 0..ticks {
         let entering = world.tick + 1;
         if let Some(t) = world.events.get(&entering) {
@@ -251,6 +277,12 @@ fn run_gravity(
             }
         }
         world.step();
+        let tick_contacts = std::mem::take(&mut world.last_contacts);
+        all_contacts.extend(
+            tick_contacts
+                .iter()
+                .map(|c| (c.tick, c.a, c.b, c.jn, c.cx, c.cy)),
+        );
         if let Some(w) = writer.as_mut() {
             if let Some(observer) = world.observer.as_ref() {
                 for &(region, to_coarse) in &observer.policy_events {
@@ -289,6 +321,17 @@ fn run_gravity(
                     qxx: tot.qxx,
                     qxy: tot.qxy,
                     qyy: tot.qyy,
+                })
+                .expect("stream write failed");
+            }
+            for c in &tick_contacts {
+                w.write(&Record::Contact {
+                    tick: c.tick,
+                    body_a: c.a,
+                    body_b: c.b,
+                    jn: c.jn,
+                    cx: c.cx,
+                    cy: c.cy,
                 })
                 .expect("stream write failed");
             }
@@ -331,16 +374,34 @@ fn run_gravity(
         w.flush().expect("flush failed");
     }
     let (.., px, py, energy) = world.totals();
-    println!(
-        "seed={} ticks={} bodies={} hash={:016x} px={:e} py={:e} E={:e}",
+    let mut line = format!(
+        "seed={} ticks={} bodies={} hash={:016x} px={:e} py={:e} E={:e} contacts={}",
         seed,
         world.tick,
         world.bodies.len(),
         world.world_hash(),
         px,
         py,
-        energy
+        energy,
+        all_contacts.len()
     );
+    if wav.is_some() || contacts {
+        let excitations: Vec<Excitation> = all_contacts
+            .iter()
+            .map(|&(tick, a, b, jn, _, _)| Excitation {
+                tick,
+                mass_a: world.bodies[a as usize].mass,
+                mass_b: world.bodies[b as usize].mass,
+                jn,
+            })
+            .collect();
+        let pcm = audio::synthesize(&excitations, world.tick);
+        if let Some(path) = &wav {
+            std::fs::write(path, audio::wav_bytes(&pcm)).expect("failed to write wav");
+        }
+        line.push_str(&format!(" audio={:016x}", audio::pcm_hash(&pcm)));
+    }
+    println!("{line}");
 }
 
 fn body_state_record(world: &GravityWorld, i: usize) -> Record {

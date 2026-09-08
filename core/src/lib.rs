@@ -2,6 +2,7 @@ pub const REGION_FINE: u32 = 64;
 pub const REGIONS_PER_AXIS: u32 = 2;
 pub const COARSE_FACTOR: u32 = 2;
 
+pub mod audio;
 pub mod gravity;
 
 pub const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;

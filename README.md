@@ -56,6 +56,13 @@ transform of the frozen jitter (measured: dipole 0.0 relative,
 quadrupole ~1e-15; synthesized-set energy delta improves 2-20x over
 section 19; post-expansion deviation stays region-scale, < 40 measured,
 tolerance 64). Section 19 streams (no multipole record) still verify.
+Sections 21-22 (2026-09-07): contact physics + modal audio — impulsive,
+perfectly inelastic, frictionless body-body contact between fine bodies
+(single pinned pass per tick, no solver iteration; momentum ledger
+conserved by axiom), Contact records in the stream, and audio as a pure
+function of the stream (section 22: contact-excited damped resonators,
+65536 Hz mono PCM16 WAV, FNV audio hash) — bit-verified by three
+implementations including the synthesized samples.
 See [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Determinism contract
@@ -73,4 +80,6 @@ cargo test
 
 Golden-stream regression corpus lives in `core/tests/golden/`; the CLI is
 `cargo run --bin ontos -- --ticks N --seed S [--demote RX RY] [--promote RX RY]
-[--out FILE]`.
+[--out FILE]` (life) or `--mode gravity [--bodies N] [--demote-at T RX RY]
+[--promote-at T RX RY] [--collapse-at T RX RY] [--expand-at T RX RY]
+[--observer OFFSET] [--contacts] [--wav FILE] [--out FILE]`.
