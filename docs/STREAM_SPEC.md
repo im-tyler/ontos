@@ -905,7 +905,197 @@ no solver tolerance. The parameters travel in the stream.
   impulses exactly and the cumulative drift is reported.
 
 CLI: `--restitution E`, `--friction F` (each requiring --contacts)
-and `--walls` (implies --contacts) emit the ContactParams record with
-the given values; with none of them, --contacts runs stay
-bit-identical to section 21. The output line's contacts=N counts
-every Contact record, pseudo-id contacts included.
+  and `--walls` (implies --contacts) emit the ContactParams record with
+  the given values; with none of them, --contacts runs stay
+  bit-identical to section 21. The output line's contacts=N counts
+  every Contact record, pseudo-id contacts included.
+
+## 25. Phase 4 v4: per-shell radial synthesis (version 2, additive)
+
+Section 23 pins the pair-distance structure with a single aggregate:
+one binding scalar closed by one radial scale. The distribution is
+still free — a synthesis with the core over-bound and the halo
+under-bound closes the total exactly. This section resolves the radial
+profile: members are split into pinned rank shells (equal-count radial
+groups of the layout), the collapse records each shell's intra-shell
+binding alongside the section 23 total, and the expansion solves one
+global scale closing the total and then one correction scale per
+shell, each by the section 23 bisection, in pinned order. Intra-shell
+pair distances close per shell exactly; the total closes exactly at
+the global step and is retained to a bounded deviation after the
+per-shell corrections (the honest trade, reported by the verifier);
+cross-shell distances beyond that are unpinned. No absolute shell
+edges exist — rank shells are scale-free, so record-time and
+expansion-time classifications are comparable without extra record
+fields.
+
+- New record, emitted immediately after every RegionMultipole record
+  at the same boundary when the run is in shells mode:
+  tag 13 RegionShells: u64 tick, u32 region_x, u32 region_y,
+    f64 binding, f64 b0, f64 b1, f64 b2, f64 b3
+  Payload is 56 bytes plus the tag byte (8+4+4+40). binding is the
+  section 23 total over all member pairs; b_k are the per-shell
+  intra-shell bindings below. A run is either in radial mode (section
+  23, tag 11) or shells mode (this section, tag 13); every collapse of
+  the run emits exactly one of the two records after its
+  RegionMultipole record. A collapse cycle that carries a
+  RegionShells record expands per this section; one with RegionRadial
+  expands per section 23; one with neither region record per section
+  20/19. For an empty collapse (N=0) all five floats are zero.
+
+- Shell decomposition (applies identically at collapse and at
+  expansion, to the member list in id order). Let n be the member
+  count. The shell count is S = min(4, max(1, n div 3)) for n >= 1
+  (n = 0 carries no shells; S = 1 for n <= 5, 2 for 6 <= n <= 8,
+  3 for 9 <= n <= 11, 4 for n >= 12; derived from the RegionCollapsed
+  body_count, never stored). Every shell holds at least 3 members:
+  two-member shells close on a single pair and the exact closure of
+  one pair's binding can demand extreme scales that wreck the
+  retained total (the degeneracy is why small collapses fall back to
+  S = 1, which degenerates to the section 23 closure up to rounding —
+  the per-shell correction re-solves the already-closed total). The
+  classified layout is:
+  - at collapse: the materialized member positions about the record's
+    com (dx_i = x_i - com_x, dy_i = y_i - com_y);
+  - at expansion: the section 20 base displacements about their
+    mass-weighted mean (swx = sum_i m_i * bx_i left-to-right in id
+    order, cx = swx / mass, likewise y).
+  Radii r_i = sqrt(dx_i * dx_i + dy_i * dy_i). Sort the members by
+  (r_i, id) ascending (ids are unique, so the order is total). Shell
+  sizes: q = n div S, rem = n mod S; the first rem shells hold q + 1
+  sorted positions, the rest q. Shell(i) is the shell containing i's
+  sorted position.
+
+- Record contents: binding = the section 23 total over all member
+  pairs (the exact negation of the collapse energy's potential term,
+  identical accumulator to a section 23 record); b_k = sum over member
+  pairs i < j in id order with shell(i) = shell(j) = k of
+  m_i * m_j / sqrt(d2_ij + eps2), accumulated in the section 23 double
+  loop (iterate a over members in id order, b over a+1.., crediting
+  shell(a)'s accumulator when shell(a) == shell(b)). Slots k >= S are
+  zero. Cross-shell bindings are not recorded; they are pinned only
+  through the total.
+
+- Expansion of a shells cycle. Draw sequence, section 19 velocity
+  residual, section 20 base displacements, and dipole residual are
+  unchanged. Positions:
+  1. Compute the section 20 base displacements (bx_i, by_i).
+  2. Classify the base per the shell decomposition above (S derived
+     from the same member count).
+  3. Global scale: solve lambda exactly as section 23 does (bracket by
+     doubling, at most 64 times, then exactly 128 bisections) with the
+     RegionShells binding field as the target, over ALL member pairs
+     of the base; the section 23 guards apply (n < 2 skips the scale,
+     binding >= F(0.0) pins lambda = 0.0). Apply bx_i = lambda * bx_i
+     to every member.
+  4. Per-shell corrections, for each shell k = 0..S-1 in pinned order:
+     gather the shell's member pairs from the GLOBALLY SCALED
+     displacements (W_p = m_i * m_j, d2_p from the scaled base) in the
+     section 23 double-loop order and solve mu_k with the same
+     bisection and guards against b_k: if the shell holds fewer than 2
+     members or b_k <= 0.0, mu_k = 1.0; else if b_k >= F_k(0.0),
+     mu_k = 0.0; else the pinned bracket-and-bisect. Shells are
+     disjoint so the solves are independent; the pinned order fixes
+     the walk. Apply bx_i = mu_{s(i)} * bx_i per member.
+  5. Recenter over all members exactly as section 23 (the scaled
+     mass-weighted mean is generally nonzero when the mus differ; the
+     recenter is a rigid translation and does not change pair
+     distances).
+  6. F_total = sum over ALL member pairs i < j in id order of
+     m_i * m_j / sqrt(d2_ij + 1.0), d2 from the scaled and recentered
+     displacements (0.0 when n < 2).
+  7. The section 20 dipole residual applies (positions = com + base
+     for i < N-1; the last body absorbs the dipole residual).
+  Velocities: the section 23 spread-scale solve unchanged, with
+  K = energy + F_total. In exact arithmetic the synthesized potential
+  is -F_total, so the synthesized-set energy closes on the record to
+  rounding whenever the target lies at or above the residual kinetic
+  floor ke(0) (the section 23 reachability rule; below it the vertex
+  applies and the miss is reported).
+- Momentum: unchanged — the residual body closes total momentum on
+  (px, py) exactly as section 19.
+- Hashes and totals: synthesized states enter body/region/world
+  hashes and totals exactly as emitted, unchanged.
+- Verification: bit-match the RegionShells fields against locally
+  computed values, plus (check framework, not format): for each shell
+  k, the binding of the shell's solve-time member pairs evaluated at
+  the FINAL synthesized positions closes on b_k (relative <= 1e-9;
+  measured ~1e-14 across a 560-cycle seed sweep); the total binding
+  over all synthesized pairs is reported against the record's binding
+  field and bounded (measured <= 1.5 across seeds, verifier bound 2.0;
+  the per-shell corrections trade total exactness for per-shell
+  exactness — the global scale keeps the trade bounded); the
+  synthesized-set total energy closes on the RegionCollapsed energy
+  (relative <= 1e-9 when the sigma target is reachable; cycles whose
+  target falls below the residual kinetic floor ke(0) take the section
+  23 vertex and their miss is reported and bounded — measured <= 0.5,
+  bound 1.0, roughly one cycle in six in a wide sweep); dipole closure
+  is unchanged (<= 1e-12); the quadrupole deviation |Q_syn - Q_rec| /
+  |Q_rec| is reported and bounded (measured <= 11.8, bound 16.0).
+  Tolerances live in the verifier's check framework.
+
+CLI: `--shells` enables shells mode for gravity runs (exclusive with
+`--radial`); collapses then emit RegionShells records (immediately
+after RegionMultipole, instead of RegionRadial) and expansions run
+this section. Without the flag, output is bit-identical to section
+23/20 runs.
+
+## 26. Collapse-on-coarse composition (version 2, clarifications)
+
+Section 19's clarification "collapsing an ephemeris-coarse region
+first materializes polynomial evaluations at the collapse tick" left
+the full composition underspecified: which bodies enter when windows
+of other regions are active, what happens to window members that
+evaluated out of the box, and how the ledger and the record interact
+across the seam. This section pins the semantics. It adds no records
+and changes no formats; it is normative clarification plus the
+uniform membership rule that demote already follows.
+
+- Membership rule: the member set of a collapse of region R at tick t
+  is every body that (a) is not currently collapsed, and (b) whose
+  state at tick t — fine bodies: their integrated state; coarse
+  bodies: their polynomial evaluation at t — lies in R's box. This is
+  the section 14 demote selection rule applied to collapse. A coarse
+  body of ANOTHER region's window whose evaluation lies in R's box is
+  absorbed into the collapse; its fit is discarded and its window
+  membership ends (its former region's next re-fit simply no longer
+  sees it).
+- Own-window termination: collapse of R terminates R's window for
+  ALL of R's coarse bodies. Each materializes its evaluation at t;
+  in-box bodies join the collapse; out-of-box bodies become unmanaged
+  Fine with state = evaluation — the section 14 re-fit exit rule
+  applied at collapse. No polynomial is ever evaluated past its
+  window end because of a collapse: the fits are discarded at the
+  boundary.
+- Record totals: computed from the materialized states in the section
+  19 fixed id-order summations — identical in form to a fine-region
+  collapse. RegionCollapsed, RegionMultipole, and the mode record
+  (RegionRadial or RegionShells) are emitted exactly as for any other
+  collapse.
+- Freeze and thaw: window state freezes as the materialized
+  evaluations composed into the collapse record (positions, momenta,
+  and the derived totals). It does not thaw: expansion synthesizes
+  per sections 19-25 from the record alone; no window resumes after
+  expansion. A demote of the collapsed region is a no-op (section 19);
+  a promote expands.
+- Momentum ledger: collapse and expansion never update px, py. While
+  the region was coarse, one-sided (fc) kicks booked the fine side
+  only; those bookings persist across the collapse and expansion. The
+  record's px, py are the materialized sums, which exclude the
+  reactions owed to the coarse bodies — the difference is the seam's
+  ledger drift, the same quantity section 17 bounds for promote-from-
+  window transitions; the verifier owns the tolerance.
+- Boundary ordering: when a collapse is scheduled at the same
+  boundary at which a window would re-fit, RegionLevel events apply
+  first (stream order), and the collapse discards the window before
+  any re-fit could run — the re-fit check sees a Collapsed region and
+  skips (generalizes the section 18 ordering to all events).
+- Gravity during the collapsed phase is unchanged: the region acts as
+  a single body of mass M at com; com and v_com are frozen (section
+  19).
+
+Verification: bit-match as usual (the record's totals against the
+verifier's own materialization), plus (check framework, not format):
+runs that compose demote -> collapse -> expand keep the section 17
+ledger and drift bounds; out-of-box window bodies surface as level-1
+BodyStates from the collapse tick on.

@@ -181,10 +181,35 @@ The physics engine is not a dependency of this project. It is the product.
   the honest, documented trade. Opt-in via `--radial`; verified
   bit-exact by three implementations (goldens g_radial, simval
   examples/ontos_gravity/radial, C++ dump) with the new
-  `ontos_radial_shape` check closing binding/energy at 1e-9. Open:
-  collapse-on-coarse composition semantics; per-shell radial detail
-  beyond the single binding scalar (the pair-distance distribution is
-  now pinned only in aggregate).
+  `ontos_radial_shape` check closing binding/energy at 1e-9. v4 DONE
+  2026-09-08 (spec sections 25-26). Per-shell radial detail: §23 pinned
+  the pair-distance distribution only in aggregate; §25 splits the
+  members into pinned rank shells (equal-count radial groups,
+  S = min(4, n/3) so every shell holds >= 3 members — single-pair
+  shells are degenerate), the collapse freezes each shell's
+  intra-shell binding alongside the §23 total (RegionShells, tag 13:
+  binding + b0..b3), and the expansion solves one global scale closing
+  the total and then one correction per shell closing its b_k, each by
+  the pinned §23 bisection. Invariants: per-shell binding exact
+  (~1e-14 measured), dipole exact, energy exact whenever the sigma
+  target is reachable; honest trades reported and bounded: total
+  binding <= 1.5 (bound 2.0), vertex-cycle energy <= 0.5 (bound 1.0,
+  ~1 cycle in 6), quadrupole <= 11.8 (bound 16.0). Collapse-on-coarse
+  composition (§26): collapse of a coarse region terminates its window
+  (every coarse body of the region materializes its evaluation;
+  out-of-box bodies leave as unmanaged fine — the §14 refit exit
+  rule), membership follows the demote rule (evaluated state at the
+  tick, collapsed bodies excluded, foreign windows absorbed and their
+  fits discarded), the record's totals freeze from the materialized
+  states, window state never thaws (expansion synthesizes from the
+  record), and the ledger is untouched by collapse/expand — its
+  seam drift is the same quantity §17 bounds (measured on the
+  g_coarse_collapse corpus: pos 2.0e-4, mom 1.0e-3, energy 3.7e-5).
+  Both verified bit-exact by three implementations (goldens g_shells,
+  g_coarse_collapse; simval examples shells/, coarse_collapse/; C++
+  dump) with the new `ontos_shell_shape` check. Open: none for the
+  §23 list — remaining Phase 4 ideas (cross-shell binding detail,
+  angular structure) are out of scope until a consumer needs them.
 
 ## Non-goals
 

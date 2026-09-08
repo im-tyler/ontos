@@ -103,6 +103,8 @@ pub struct CollapseTotals {
     pub qyy: f64,
     pub binding: f64,
     pub radial: bool,
+    pub shells: bool,
+    pub shell_bindings: [f64; 4],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -180,6 +182,7 @@ pub struct GravityWorld {
     pub region_totals: [Option<CollapseTotals>; 4],
     pub region_multipole: [bool; 4],
     pub region_radial: [bool; 4],
+    pub region_shells: [bool; 4],
     pub collapse_records: Vec<CollapseTotals>,
     pub events: BTreeMap<u64, Vec<(u8, Action)>>,
     pub tick: u64,
@@ -188,7 +191,9 @@ pub struct GravityWorld {
     pub observer: Option<Observer>,
     pub multipole: bool,
     pub radial: bool,
+    pub shells: bool,
     pub last_expansion: Vec<Body>,
+    pub last_expansion_shells: Vec<Vec<u32>>,
     pub contacts: bool,
     pub contact_params: bool,
     pub restitution: f64,
@@ -332,6 +337,7 @@ impl GravityWorld {
             region_totals: [None; 4],
             region_multipole: [false; 4],
             region_radial: [false; 4],
+            region_shells: [false; 4],
             collapse_records: Vec::new(),
             events: BTreeMap::new(),
             tick: 0,
@@ -340,7 +346,9 @@ impl GravityWorld {
             observer: None,
             multipole: true,
             radial: false,
+            shells: false,
             last_expansion: Vec::new(),
+            last_expansion_shells: Vec::new(),
             contacts: false,
             contact_params: false,
             restitution: 0.0,
@@ -498,6 +506,13 @@ impl GravityWorld {
 
     fn collapse_region(&mut self, region: u8, t0: u64) {
         let (x0, y0, x1, y1) = Self::box_of(region);
+        for i in 0..self.bodies.len() {
+            if self.coarse[i].is_some() && self.body_region[i] == region {
+                self.bodies[i] = self.body_state_at(i, t0);
+                self.coarse[i] = None;
+                self.body_region[i] = UNMANAGED;
+            }
+        }
         let members: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| {
                 self.collapsed[i].is_none() && {
@@ -526,10 +541,13 @@ impl GravityWorld {
                 qyy: 0.0,
                 binding: 0.0,
                 radial: self.radial,
+                shells: self.shells,
+                shell_bindings: [0.0; 4],
             };
             self.region_totals[region as usize] = Some(totals);
             self.region_multipole[region as usize] = self.multipole;
             self.region_radial[region as usize] = self.radial;
+            self.region_shells[region as usize] = self.shells;
             self.collapse_records.push(totals);
             self.region_mode[region as usize] = RegionMode::Collapsed;
             return;
@@ -573,6 +591,27 @@ impl GravityWorld {
             qxx += b.mass * dx * dx;
             qxy += b.mass * dx * dy;
             qyy += b.mass * dy * dy;
+        }
+        let radii: Vec<f64> = states
+            .iter()
+            .map(|b| {
+                let dx = b.x - com_x;
+                let dy = b.y - com_y;
+                (dx * dx + dy * dy).sqrt()
+            })
+            .collect();
+        let shells = shell_assignment(&radii);
+        let mut shell_bindings = [0.0f64; 4];
+        for a in 0..states.len() {
+            for b in (a + 1)..states.len() {
+                if shells[a] != shells[b] {
+                    continue;
+                }
+                let dx = states[b].x - states[a].x;
+                let dy = states[b].y - states[a].y;
+                let s2 = dx * dx + dy * dy + EPS2;
+                shell_bindings[shells[a]] += states[a].mass * states[b].mass / s2.sqrt();
+            }
         }
         let mut rng = SplitMix64::new(self.seed ^ (region as u64).wrapping_mul(0x9E3779B97F4A7C15));
         let mut jitter = Vec::with_capacity(members.len());
@@ -623,10 +662,13 @@ impl GravityWorld {
             qyy,
             binding,
             radial: self.radial,
+            shells: self.shells,
+            shell_bindings,
         };
         self.region_totals[region as usize] = Some(totals);
         self.region_multipole[region as usize] = self.multipole;
         self.region_radial[region as usize] = self.radial;
+        self.region_shells[region as usize] = self.shells;
         self.collapse_records.push(totals);
         self.region_mode[region as usize] = RegionMode::Collapsed;
     }
@@ -638,14 +680,22 @@ impl GravityWorld {
         let totals = self.region_totals[region as usize].take();
         let multipole = self.region_multipole[region as usize];
         let radial = self.region_radial[region as usize];
+        let shells = self.region_shells[region as usize];
         self.region_multipole[region as usize] = false;
         self.region_radial[region as usize] = false;
+        self.region_shells[region as usize] = false;
+        self.last_expansion_shells = Vec::new();
         if !members.is_empty() {
             let t = totals.expect("collapsed region carries totals");
             let mut sigma = 1.0f64;
+            let mut shell_groups: Vec<Vec<u32>> = Vec::new();
             if multipole {
                 let mut base = self.expand_base(&members, &t);
-                if radial {
+                if shells {
+                    let (ft, groups) = self.shell_scale(&members, &t, &mut base);
+                    shell_groups = groups;
+                    sigma = self.solve_spread_sigma(&members, &t, t.energy + ft);
+                } else if radial {
                     let fl = self.radial_scale(&members, &t, &mut base);
                     sigma = self.solve_spread_sigma(&members, &t, t.energy + fl);
                 }
@@ -665,6 +715,7 @@ impl GravityWorld {
             self.bodies[last].vx = (t.px - sx) / self.bodies[last].mass;
             self.bodies[last].vy = (t.py - sy) / self.bodies[last].mass;
             self.last_expansion = members.iter().map(|&i| self.bodies[i]).collect();
+            self.last_expansion_shells = shell_groups;
             for &i in &members {
                 self.body_region[i] = UNMANAGED;
             }
@@ -810,6 +861,132 @@ impl GravityWorld {
             b.1 -= wy;
         }
         f(lam)
+    }
+
+    fn shell_scale(
+        &self,
+        members: &[usize],
+        t: &CollapseTotals,
+        base: &mut [(f64, f64)],
+    ) -> (f64, Vec<Vec<u32>>) {
+        let n = members.len();
+        if n < 2 {
+            return (0.0, Vec::new());
+        }
+        let mut all_pairs: Vec<(f64, f64)> = Vec::with_capacity(n * (n - 1) / 2);
+        for a in 0..n {
+            for b in (a + 1)..n {
+                let w = self.bodies[members[a]].mass * self.bodies[members[b]].mass;
+                let dx = base[b].0 - base[a].0;
+                let dy = base[b].1 - base[a].1;
+                all_pairs.push((w, dx * dx + dy * dy));
+            }
+        }
+        let solve = |pairs: &[(f64, f64)], target: f64| -> f64 {
+            let f = |lam: f64| -> f64 {
+                let mut total = 0.0f64;
+                for &(w, d2) in pairs {
+                    total += w / (lam * lam * d2 + 1.0).sqrt();
+                }
+                total
+            };
+            if target >= f(0.0) {
+                0.0
+            } else {
+                let mut hi = 1.0f64;
+                let mut doublings = 0;
+                while f(hi) > target && doublings < 64 {
+                    hi *= 2.0;
+                    doublings += 1;
+                }
+                let mut lo = 0.0f64;
+                for _ in 0..128 {
+                    let mid = (lo + hi) * 0.5;
+                    if f(mid) >= target {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                (lo + hi) * 0.5
+            }
+        };
+        let lam = solve(&all_pairs, t.binding);
+        for b in base.iter_mut() {
+            b.0 *= lam;
+            b.1 *= lam;
+        }
+        let mut swx = 0.0f64;
+        let mut swy = 0.0f64;
+        for (slot, &i) in members.iter().enumerate() {
+            let m = self.bodies[i].mass;
+            swx += m * base[slot].0;
+            swy += m * base[slot].1;
+        }
+        let cx = swx / t.mass;
+        let cy = swy / t.mass;
+        let radii: Vec<f64> = base
+            .iter()
+            .map(|b| {
+                let dx = b.0 - cx;
+                let dy = b.1 - cy;
+                (dx * dx + dy * dy).sqrt()
+            })
+            .collect();
+        let shells = shell_assignment(&radii);
+        let s = shell_count(n);
+        let mut pairs: Vec<Vec<(f64, f64)>> = vec![Vec::new(); s];
+        for a in 0..n {
+            for b in (a + 1)..n {
+                if shells[a] != shells[b] {
+                    continue;
+                }
+                let w = self.bodies[members[a]].mass * self.bodies[members[b]].mass;
+                let dx = base[b].0 - base[a].0;
+                let dy = base[b].1 - base[a].1;
+                pairs[shells[a]].push((w, dx * dx + dy * dy));
+            }
+        }
+        let mut mus = [1.0f64; 4];
+        for k in 0..s {
+            let target = t.shell_bindings[k];
+            if pairs[k].is_empty() || target <= 0.0 {
+                continue;
+            }
+            mus[k] = solve(&pairs[k], target);
+        }
+        for slot in 0..n {
+            let mu = mus[shells[slot]];
+            base[slot].0 *= mu;
+            base[slot].1 *= mu;
+        }
+        let mut swx = 0.0f64;
+        let mut swy = 0.0f64;
+        for (slot, &i) in members.iter().enumerate() {
+            let m = self.bodies[i].mass;
+            swx += m * base[slot].0;
+            swy += m * base[slot].1;
+        }
+        let wx = swx / t.mass;
+        let wy = swy / t.mass;
+        for b in base.iter_mut() {
+            b.0 -= wx;
+            b.1 -= wy;
+        }
+        let mut ft = 0.0f64;
+        for a in 0..n {
+            for b in (a + 1)..n {
+                let w = self.bodies[members[a]].mass * self.bodies[members[b]].mass;
+                let dx = base[b].0 - base[a].0;
+                let dy = base[b].1 - base[a].1;
+                ft += w / (dx * dx + dy * dy + 1.0).sqrt();
+            }
+        }
+        let mut groups: Vec<Vec<u32>> = vec![Vec::new(); s];
+        for (slot, &i) in members.iter().enumerate() {
+            groups[shells[slot]].push(i as u32);
+        }
+        (ft, groups)
     }
 
     fn synth_velocities(
@@ -1407,6 +1584,31 @@ impl GravityWorld {
         }
         (level, members.len() as u64, fnv1a64(&v))
     }
+}
+
+fn shell_count(n: usize) -> usize {
+    (n / 3).clamp(1, 4)
+}
+
+fn shell_assignment(radii: &[f64]) -> Vec<usize> {
+    let n = radii.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| radii[a].total_cmp(&radii[b]).then_with(|| a.cmp(&b)));
+    let s = shell_count(n);
+    let q = n / s;
+    let rem = n % s;
+    let mut shells = vec![0usize; n];
+    let mut pos = 0usize;
+    for k in 0..s {
+        for _ in 0..(q + if k < rem { 1 } else { 0 }) {
+            shells[order[pos]] = k;
+            pos += 1;
+        }
+    }
+    shells
 }
 
 fn accel_split(
@@ -2372,5 +2574,196 @@ mod tests {
                 assert_eq!(a.mass.to_bits(), b.mass.to_bits());
             }
         }
+    }
+
+    #[test]
+    fn shells_replay_bit_identical() {
+        let run = || {
+            let mut w = GravityWorld::new(17, 12);
+            w.shells = true;
+            w.schedule(20, 0, Action::Collapse);
+            w.schedule(90, 0, Action::Promote);
+            w.schedule(91, 0, Action::Collapse);
+            w.schedule(160, 0, Action::Promote);
+            w.schedule(40, 2, Action::Collapse);
+            w.schedule(120, 2, Action::Promote);
+            w.schedule(60, 3, Action::Demote);
+            let mut hashes = Vec::new();
+            for _ in 0..200 {
+                w.step();
+                hashes.push(w.world_hash());
+            }
+            hashes
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn shells_bindings_and_energy_close_on_totals() {
+        let mut w = all_in_region_world(6);
+        w.shells = true;
+        w.schedule(1, 3, Action::Collapse);
+        w.schedule(60, 3, Action::Promote);
+        for _ in 0..60 {
+            w.step();
+        }
+        assert_eq!(w.collapse_records.len(), 1);
+        assert_eq!(w.last_expansion.len(), 6);
+        let rec = w.collapse_records[0];
+        let exp = &w.last_expansion;
+        let groups = &w.last_expansion_shells;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups.iter().map(|g| g.len()).sum::<usize>(),
+            exp.len(),
+            "groups partition the member set"
+        );
+        let by_id = |id: u32| exp.iter().find(|b| b.id == id).expect("member");
+        for (k, group) in groups.iter().enumerate() {
+            let mut binding = 0.0f64;
+            for a in 0..group.len() {
+                for b in (a + 1)..group.len() {
+                    let ba = by_id(group[a]);
+                    let bb = by_id(group[b]);
+                    let dx = bb.x - ba.x;
+                    let dy = bb.y - ba.y;
+                    binding += ba.mass * bb.mass / (dx * dx + dy * dy + 1.0).sqrt();
+                }
+            }
+            if group.len() < 2 {
+                continue;
+            }
+            let rel =
+                (binding - rec.shell_bindings[k]).abs() / rec.shell_bindings[k].abs().max(1e-30);
+            assert!(rel < 1e-9, "shell {k} binding residual {rel}");
+        }
+        let mut ke = 0.0f64;
+        for b in exp {
+            ke += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy);
+        }
+        let mut binding = 0.0f64;
+        for i in 0..exp.len() {
+            for j in (i + 1)..exp.len() {
+                let dx = exp[j].x - exp[i].x;
+                let dy = exp[j].y - exp[i].y;
+                binding += exp[i].mass * exp[j].mass / (dx * dx + dy * dy + 1.0).sqrt();
+            }
+        }
+        let energy_rel = ((ke - binding) - rec.energy).abs() / rec.energy.abs().max(1.0);
+        assert!(energy_rel < 1e-9, "energy delta {energy_rel}");
+        let total_rel = (binding - rec.binding).abs() / rec.binding.abs().max(1e-30);
+        assert!(total_rel < 0.5, "total binding retained {total_rel}");
+        let mut sx = 0.0f64;
+        let mut sy = 0.0f64;
+        for b in exp {
+            sx += b.mass * b.x;
+            sy += b.mass * b.y;
+        }
+        let dipole_scale = rec.mx.abs().max(rec.my.abs()).max(1e-30);
+        let dipole = (sx - rec.mx).abs().max((sy - rec.my).abs()) / dipole_scale;
+        assert!(dipole < 1e-12, "dipole residual {dipole}");
+    }
+
+    #[test]
+    fn shells_modes_differ_from_radial() {
+        let schedule = |w: &mut GravityWorld| {
+            w.schedule(20, 0, Action::Collapse);
+            w.schedule(90, 0, Action::Promote);
+        };
+        let mut a = GravityWorld::new(17, 12);
+        a.radial = true;
+        schedule(&mut a);
+        let mut b = GravityWorld::new(17, 12);
+        b.shells = true;
+        schedule(&mut b);
+        for _ in 0..150 {
+            a.step();
+            b.step();
+        }
+        assert_ne!(a.world_hash(), b.world_hash());
+    }
+
+    #[test]
+    fn collapse_on_coarse_replay_bit_identical() {
+        let run = || {
+            let mut w = GravityWorld::new(11, 10);
+            w.schedule(10, 3, Action::Demote);
+            w.schedule(30, 3, Action::Collapse);
+            w.schedule(120, 3, Action::Promote);
+            w.schedule(40, 0, Action::Demote);
+            w.schedule(80, 0, Action::Collapse);
+            w.schedule(160, 0, Action::Promote);
+            let mut hashes = Vec::new();
+            for _ in 0..200 {
+                w.step();
+                hashes.push(w.world_hash());
+            }
+            hashes
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn collapse_on_coarse_ends_window_for_out_of_box_bodies() {
+        let mut w = GravityWorld::new(11, 8);
+        w.bodies[0].x = 127.995;
+        w.bodies[0].y = 96.0;
+        w.bodies[0].vx = 0.5;
+        w.bodies[0].vy = 0.0;
+        w.schedule(1, 3, Action::Demote);
+        w.schedule(30, 3, Action::Collapse);
+        for _ in 0..30 {
+            w.step();
+        }
+        assert_eq!(w.collapse_records.len(), 1);
+        let rec = w.collapse_records[0];
+        assert!(rec.count > 0, "region 3 still collapses with members");
+        assert!(w.collapsed[0].is_none(), "out-of-box body is not a member");
+        let (_, _, level) = w.emitted_state(0);
+        assert_eq!(level, 1, "out-of-box window body thawed to fine");
+        assert!(w.coarse[0].is_none(), "fit discarded at collapse");
+        for _ in 0..10 {
+            w.step();
+        }
+        let (_, _, level) = w.emitted_state(0);
+        assert_eq!(level, 1, "stays fine after the collapse");
+    }
+
+    #[test]
+    fn collapse_absorbs_foreign_window_bodies_by_evaluation() {
+        let mut w = GravityWorld::new(11, 8);
+        w.bodies[0].x = 63.995;
+        w.bodies[0].y = 32.0;
+        w.bodies[0].vx = 0.5;
+        w.bodies[0].vy = 0.0;
+        w.schedule(1, 0, Action::Demote);
+        w.schedule(30, 1, Action::Collapse);
+        for _ in 0..30 {
+            w.step();
+        }
+        assert_eq!(w.collapse_records.len(), 1);
+        assert!(
+            w.collapsed[0].is_some() && w.body_region[0] == 1,
+            "foreign coarse body absorbed into region 1"
+        );
+        let (b, region, level) = w.emitted_state(0);
+        assert_eq!((region, level), (1, 2), "absorbed into region 1 collapse");
+        assert!(w.coarse[0].is_none(), "old window discarded");
+        assert!(b.x >= 60.0, "emitted near the collapsing box");
+    }
+
+    #[test]
+    fn collapse_on_coarse_ledger_drift_bounded() {
+        let mut w = GravityWorld::new(11, 10);
+        let (_, _, _, px0, py0, _) = w.totals();
+        w.schedule(10, 3, Action::Demote);
+        w.schedule(30, 3, Action::Collapse);
+        w.schedule(120, 3, Action::Promote);
+        for _ in 0..200 {
+            w.step();
+        }
+        let (_, _, _, px1, py1, _) = w.totals();
+        assert!((px1 - px0).abs() < 5e-3, "px drift {}", (px1 - px0).abs());
+        assert!((py1 - py0).abs() < 5e-3, "py drift {}", (py1 - py0).abs());
     }
 }

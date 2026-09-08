@@ -72,7 +72,23 @@ spread scale that closes the synthesized kinetic energy on the recorded
 total, driving the synthesized-set energy delta from O(1) to rounding
 (measured 0.14-0.57 relative down to ~1e-14; dipole stays exact,
 quadrupole reported and bounded <= 4.0 instead of exact — the honest
-cost of pinning pair distances). Section 24 (2026-09-08): contact
+cost of pinning pair distances). Sections 25-26 (2026-09-08): per-shell
+radial synthesis + collapse-on-coarse composition — collapses in shells
+mode (`--shells`) additionally freeze each rank shell's intra-shell
+binding (RegionShells record, tag 13: the section 23 total plus b0..b3
+over S = min(4, n/3) equal-count radial groups), and expansion solves
+one global scale closing the total plus one pinned bisection per shell
+closing its binding (per-shell exact ~1e-14, dipole exact, energy
+exact when the sigma target is reachable; total binding retained
+<= 1.5, quadrupole <= 11.8, both reported and bounded — the honest
+cost of pinning radial structure); collapsing a coarse region has
+composed semantics (section 26): the region's window terminates
+(out-of-box bodies materialize to unmanaged fine), membership follows
+the demote rule on evaluated states (foreign windows are absorbed,
+fits discarded), totals freeze from the materialized states, and no
+window state thaws — the ledger keeps its section 17 bound across the
+seam (measured pos 2.0e-4, mom 1.0e-3, energy 3.7e-5 on the
+g_coarse_collapse corpus). Section 24 (2026-09-08): contact
 extensions — restitution and Coulomb-clamped friction (ContactParams
 record, tag 12), one-sided static impulses against frozen contactants
 (ephemeris-coarse bodies, collapsed-region monopoles as disks of mass M
@@ -101,5 +117,5 @@ Golden-stream regression corpus lives in `core/tests/golden/`; the CLI is
 `cargo run --bin ontos -- --ticks N --seed S [--demote RX RY] [--promote RX RY]
 [--out FILE]` (life) or `--mode gravity [--bodies N] [--demote-at T RX RY]
 [--promote-at T RX RY] [--collapse-at T RX RY] [--expand-at T RX RY]
-[--observer OFFSET] [--contacts] [--radial] [--restitution E] [--friction F]
+[--observer OFFSET] [--contacts] [--radial] [--shells] [--restitution E] [--friction F]
 [--walls] [--wav FILE] [--out FILE]`.

@@ -28,9 +28,11 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, profile: Option<&str>, wav: 
     let mut collapse_records: Vec<Record> = Vec::new();
     let mut multipole_records: Vec<Record> = Vec::new();
     let mut radial_records: Vec<Record> = Vec::new();
+    let mut shells_records: Vec<Record> = Vec::new();
     let mut contact_records: Vec<Record> = Vec::new();
     let mut pending_multipole = false;
     let mut pending_radial = false;
+    let mut pending_shells = false;
     let mut body_index = 0usize;
     let mut last_tick = 0u64;
     let mut masses = vec![0.0f64; body_count as usize];
@@ -45,6 +47,8 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, profile: Option<&str>, wav: 
                 pending_multipole = false;
                 world.radial = world.radial || pending_radial;
                 pending_radial = false;
+                world.shells = world.shells || pending_shells;
+                pending_shells = false;
                 world.contacts = world.contacts || !contact_records.is_empty();
                 for &(region, action) in &pending {
                     world.schedule(world.tick + 1, region, action);
@@ -136,6 +140,37 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, profile: Option<&str>, wav: 
                         );
                     }
                 }
+                for rec in shells_records.drain(..) {
+                    if let Record::RegionShells {
+                        tick,
+                        region_x,
+                        region_y,
+                        binding,
+                        b0,
+                        b1,
+                        b2,
+                        b3,
+                    } = rec
+                    {
+                        assert_eq!(tick, world.tick, "{name}: RegionShells tick");
+                        let region = (region_y * 2 + region_x) as u8;
+                        let tot = world
+                            .collapsed_totals(region)
+                            .expect("{name}: region shells at record");
+                        assert_eq!(
+                            binding.to_bits(),
+                            tot.binding.to_bits(),
+                            "{name}: shells binding"
+                        );
+                        for (slot, got) in [b0, b1, b2, b3].into_iter().enumerate() {
+                            assert_eq!(
+                                got.to_bits(),
+                                tot.shell_bindings[slot].to_bits(),
+                                "{name}: shells b{slot}"
+                            );
+                        }
+                    }
+                }
                 body_index = 0;
                 last_tick = tick;
                 let local_contacts = std::mem::take(&mut world.last_contacts);
@@ -219,6 +254,10 @@ fn verify_golden_gravity_at(path: &Path, seed: u64, profile: Option<&str>, wav: 
             Record::RegionRadial { .. } => {
                 radial_records.push(record);
                 pending_radial = true;
+            }
+            Record::RegionShells { .. } => {
+                shells_records.push(record);
+                pending_shells = true;
             }
             Record::ContactParams {
                 restitution,
@@ -395,6 +434,16 @@ fn golden_gravity_multipole() {
 #[test]
 fn golden_gravity_radial() {
     verify_golden_gravity("g_radial.stream", 17);
+}
+
+#[test]
+fn golden_gravity_shells() {
+    verify_golden_gravity("g_shells.stream", 17);
+}
+
+#[test]
+fn golden_gravity_coarse_collapse() {
+    verify_golden_gravity("g_coarse_collapse.stream", 23);
 }
 
 #[test]

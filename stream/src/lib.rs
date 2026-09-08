@@ -95,6 +95,16 @@ pub enum Record {
         friction: f64,
         walls: u8,
     },
+    RegionShells {
+        tick: u64,
+        region_x: u32,
+        region_y: u32,
+        binding: f64,
+        b0: f64,
+        b1: f64,
+        b2: f64,
+        b3: f64,
+    },
 }
 
 pub struct StreamWriter<W: Write> {
@@ -288,6 +298,26 @@ impl<W: Write> StreamWriter<W> {
                 self.out.write_all(&restitution.to_le_bytes())?;
                 self.out.write_all(&friction.to_le_bytes())?;
                 self.out.write_all(&[*walls])
+            }
+            Record::RegionShells {
+                tick,
+                region_x,
+                region_y,
+                binding,
+                b0,
+                b1,
+                b2,
+                b3,
+            } => {
+                self.out.write_all(&[13u8])?;
+                self.out.write_all(&tick.to_le_bytes())?;
+                self.out.write_all(&region_x.to_le_bytes())?;
+                self.out.write_all(&region_y.to_le_bytes())?;
+                self.out.write_all(&binding.to_le_bytes())?;
+                self.out.write_all(&b0.to_le_bytes())?;
+                self.out.write_all(&b1.to_le_bytes())?;
+                self.out.write_all(&b2.to_le_bytes())?;
+                self.out.write_all(&b3.to_le_bytes())
             }
         }
     }
@@ -538,6 +568,19 @@ impl<R: Read> StreamReader<R> {
                     restitution: f64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
                     friction: f64::from_le_bytes(self.scratch[8..16].try_into().unwrap()),
                     walls,
+                }
+            }
+            13 => {
+                self.take(56)?;
+                Record::RegionShells {
+                    tick: u64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
+                    region_x: u32::from_le_bytes(self.scratch[8..12].try_into().unwrap()),
+                    region_y: u32::from_le_bytes(self.scratch[12..16].try_into().unwrap()),
+                    binding: f64::from_le_bytes(self.scratch[16..24].try_into().unwrap()),
+                    b0: f64::from_le_bytes(self.scratch[24..32].try_into().unwrap()),
+                    b1: f64::from_le_bytes(self.scratch[32..40].try_into().unwrap()),
+                    b2: f64::from_le_bytes(self.scratch[40..48].try_into().unwrap()),
+                    b3: f64::from_le_bytes(self.scratch[48..56].try_into().unwrap()),
                 }
             }
             t => return Err(ParseError::UnknownTag(t)),
@@ -971,5 +1014,30 @@ mod tests {
                 .unwrap_err(),
             ParseError::BadWalls(2)
         );
+    }
+
+    #[test]
+    fn region_shells_roundtrip_gravity() {
+        let mut buf = Vec::new();
+        let rec = Record::RegionShells {
+            tick: 30,
+            region_x: 1,
+            region_y: 1,
+            binding: 3.71875,
+            b0: 1.5,
+            b1: 0.6875,
+            b2: 0.0,
+            b3: 0.0,
+        };
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 10).unwrap();
+            w.write(&rec).unwrap();
+            w.flush().unwrap();
+        }
+        assert_eq!(buf[20], 13);
+        assert_eq!(buf.len(), 21 + 56);
+        let mut r = StreamReader::new(&buf[..]).unwrap();
+        assert_eq!(r.next_record().unwrap(), Some(rec));
+        assert_eq!(r.next_record().unwrap(), None);
     }
 }

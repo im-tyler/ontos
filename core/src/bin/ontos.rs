@@ -41,6 +41,7 @@ fn main() {
     let mut observer_offset: Option<u64> = None;
     let mut contacts = false;
     let mut radial = false;
+    let mut shells = false;
     let mut restitution: Option<f64> = None;
     let mut friction: Option<f64> = None;
     let mut walls = false;
@@ -80,6 +81,10 @@ fn main() {
             }
             "--radial" => {
                 radial = true;
+                i += 1;
+            }
+            "--shells" => {
+                shells = true;
                 i += 1;
             }
             "--restitution" => {
@@ -166,7 +171,7 @@ fn main() {
                      life:    [--demote RX RY] [--promote RX RY]...\n\
                      gravity: [--demote-at T RX RY] [--promote-at T RX RY] [--collapse-at T RX RY]\n\
                               [--expand-at T RX RY] [--observer OFFSET] [--contacts] [--radial]\n\
-                              [--restitution E] [--friction F] [--walls] [--wav FILE]\n\
+                              [--shells] [--restitution E] [--friction F] [--walls] [--wav FILE]\n\
                               [--test-ic wallshot|coarsehit] (test-only corpus initial conditions)..."
                 );
                 std::process::exit(1);
@@ -175,6 +180,10 @@ fn main() {
     }
     if (restitution.is_some() || friction.is_some()) && !contacts {
         eprintln!("--restitution/--friction require --contacts");
+        std::process::exit(1);
+    }
+    if radial && shells {
+        eprintln!("--radial and --shells are exclusive");
         std::process::exit(1);
     }
 
@@ -195,6 +204,7 @@ fn main() {
             observer_offset,
             contacts,
             radial,
+            shells,
             restitution.unwrap_or(0.0),
             friction.unwrap_or(0.0),
             walls,
@@ -294,6 +304,7 @@ fn run_gravity(
     observer_offset: Option<u64>,
     contacts: bool,
     radial: bool,
+    shells: bool,
     restitution: f64,
     friction: f64,
     walls: bool,
@@ -308,6 +319,7 @@ fn run_gravity(
     };
     world.contacts = contacts;
     world.radial = radial;
+    world.shells = shells;
     let params = restitution != 0.0 || friction != 0.0 || walls;
     if params {
         world.contact_params = true;
@@ -406,6 +418,19 @@ fn run_gravity(
                         region_x: (tot.region % 2) as u32,
                         region_y: (tot.region / 2) as u32,
                         binding: tot.binding,
+                    })
+                    .expect("stream write failed");
+                }
+                if tot.shells {
+                    w.write(&Record::RegionShells {
+                        tick: tot.tick,
+                        region_x: (tot.region % 2) as u32,
+                        region_y: (tot.region / 2) as u32,
+                        binding: tot.binding,
+                        b0: tot.shell_bindings[0],
+                        b1: tot.shell_bindings[1],
+                        b2: tot.shell_bindings[2],
+                        b3: tot.shell_bindings[3],
                     })
                     .expect("stream write failed");
                 }
