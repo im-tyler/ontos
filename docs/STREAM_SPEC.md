@@ -498,6 +498,157 @@ bit-identical synthesized states.
   computed values, plus (check framework, not format): the synthesized
   set's mass-weighted position sum closes on (mx, my), and its second
   central moments (computed with the same dx_i = x_i - com_x formulas
-  against the record's com) close on (qxx, qxy, qyy). Tolerances live
-  in the verifier's check framework. Post-expansion deviation vs an
+  against the record's com) close on (qxx, qxy, qyy). Tolerances live in
+  the verifier's check framework. Post-expansion deviation vs an
   all-fine reference remains a verifier-owned bound (section 19).
+
+## 21. Contact dynamics (version 2, additive)
+
+Bodies interact by contact in addition to gravity: fine bodies that
+overlap receive an impulsive, perfectly inelastic, frictionless
+velocity resolution. Contact is an opt-in mode selected by record
+presence, exactly like section 19/20 mode selection: a stream in
+contact mode carries tag 10 Contact records; a verifier that encounters
+none steps exactly as before (contact trajectories are bit-identical to
+gravity-only trajectories up to the first contact). Contact mode is
+sticky: from the first Contact record to the end of the stream, the
+contact pass of this section runs every tick. Streams with no Contact
+records are indistinguishable from section 13-20 streams and verify
+against implementations that know nothing of this section (except that
+they must reject unknown tag 10 if they predate it).
+
+- Body radius: r_i = CONTACT_R * sqrt(m_i) with CONTACT_R = 2.0. The
+  radius is a pure function of mass (never stored, recomputed where
+  needed). Masses are in [0.5, 2.5] by section 12, so radii lie in
+  [sqrt(0.5)*2, sqrt(2.5)*2].
+- The contact pass runs at the end of each tick, after the second fc
+  kick and before the tick counter advances. It iterates pairs
+  (i, j), i < j, in lexicographic body-id order, over bodies that are
+  fine at that moment (ephemeris-coarse and collapsed bodies never
+  contact; a pair with a non-fine member is skipped). Pairs are
+  processed and applied immediately in that single fixed order — there
+  is no iteration, no convergence loop, and no solver tolerance.
+- Detection: dx = x_j - x_i;  dy = y_j - y_i;  d2 = dx*dx + dy*dy;
+  rs = r_i + r_j. The pair overlaps iff d2 < rs * rs.
+- Normal: if d2 == 0.0 the normal is pinned to (nx, ny) = (1.0, 0.0);
+  otherwise dist = sqrt(d2), nx = dx / dist, ny = dy / dist.
+- Relative normal velocity: vn = (vx_j - vx_i) * nx + (vy_j - vy_i) * ny.
+  The pair resolves iff it overlaps AND vn < 0.0 (approaching).
+- Impulse (perfectly inelastic, frictionless, equal-and-opposite):
+  inv = 1.0 / (m_i + m_j);  t = vn * inv;
+  f_i = t * m_j;  f_j = t * m_i;
+  vx_i += f_i * nx;  vy_i += f_i * ny;  vx_j -= f_j * nx;  vy_j -= f_j * ny.
+  (vn < 0 makes f_i, f_j negative: body i is pushed along -n, body j
+  along +n — apart. The equal-and-opposite pair products m_i * f_i and
+  m_j * f_j share the t operand, so the exchange conserves momentum to
+  rounding.)
+  Positions are not modified: with dt = 2^-10 and vn of order unity the
+  per-contact penetration is below 1e-3 and is left to the next tick's
+  impulse (no position correction, no Baumgarte). The impulse magnitude
+  recorded for consumers is jn = -vn * mu with mu = (m_i * m_j) /
+  (m_i + m_j) (positive; note mu recomputed with this exact op order).
+- Momentum ledger: contact impulses never update px, py. Like fine-fine
+  gravity exchanges, contacts between fine bodies conserve the ledger by
+  axiom; the physical sum of m*v changes only by rounding (a few ULP
+  per contact).
+- Touching set: at the end of each pass, the set of overlapping
+  fine pairs (whether or not an impulse fired) replaces the previous
+  set. A Contact record is emitted iff an impulse fired AND the pair
+  was NOT in the previous tick's set (a contact beginning). Resting
+  contact (pair stays overlapping) re-fires gravity-built approach
+  velocity every tick; those impulses apply silently and emit nothing.
+  Pairs leave the set by separating, or by either member leaving the
+  fine level (demote/collapse drops its pairs from the set; a body that
+  returns to fine and still overlaps begins a fresh contact).
+- New record:
+  tag 10 Contact: u64 tick, u32 body_a, u32 body_b (a < b),
+    f64 jn, f64 cx, f64 cy
+  Payload is 40 bytes plus the tag byte (8+4+4+8+8+8). cx, cy = the
+  contact midpoint (x_i + x_j) * 0.5, (y_i + y_j) * 0.5 from the
+  positions at detection (post-drift, pre-impulse — positions are not
+  changed by the impulse). jn is the impulse magnitude above. The tick
+  field is the tick whose pass produced the event.
+- Emission contract: Contact records for tick t are written immediately
+  before that tick's TickHeader (after any RegionCollapsed/
+  RegionMultipole records of the same boundary), in generation order —
+  lexicographic (a, b) within the tick. A verifier applies them on
+  encounter and enables the sticky contact mode at the TickHeader of the
+  first one; the emitter's records for tick t must bit-match the
+  verifier's own pass at tick t.
+- Hashes and totals: unchanged in shape. BodyState records for tick t
+  carry the post-impulse velocities; body/region/world hashes and
+  TotalsState are computed from the emitted states as before. The
+  touching set is replay state, not hashed state; verifiers reconstruct
+  it by running the pass.
+- Verification: bit-match as usual (Contact records and every affected
+  BodyState/TotalsState/hash), plus (check framework, not format):
+  jn > 0.0 for every emitted record; the relative normal speed of a
+  pair measured immediately after its own impulse closes on 0.0 within
+  rounding of the impulse arithmetic (later impulses in the same
+  single pass may perturb other pairs — the next tick's pass resolves
+  those); and the ledger is exactly invariant in an all-fine contact
+  run. Position/energy drift against a contact-free reference is not a
+  meaningful check for contact streams (contacts are dissipative by
+  design); verifiers scope their reference-drift checks to contact-free
+  runs.
+
+CLI: `--contacts` enables contact mode for gravity runs; with it, the
+output line gains `contacts=N` (records emitted). Without the flag the
+CLI emits no Contact records and produces bit-identical output to
+section 13-20 runs.
+
+## 22. Modal audio (pure function of the stream)
+
+Audio is a PURE FUNCTION of the record stream: contact events excite
+damped resonant modes, synthesized offline so that any conforming
+consumer produces bit-identical samples. Nothing about the simulation
+depends on audio; a stream with no Contact records synthesizes silence
+(the all-zero PCM block).
+
+- Format: mono, 16-bit signed little-endian PCM, sample rate 65536 Hz.
+  One tick spans exactly 64 samples (65536 = 1024 * 64: audio time is
+  the sim's fixed dt scaled 2^-6 — no resampling anywhere). The
+  container is the canonical 44-byte RIFF/WAVE header:
+  "RIFF", u32 36 + data_size, "WAVE", "fmt ", u32 16, u16 1 (PCM),
+  u16 1 (channels), u32 65536, u32 131072 (byte rate), u16 2 (block
+  align), u16 16 (bits), "data", u32 data_size, then the PCM bytes.
+- Excitation: a Contact record at tick t excites at sample index
+  e = (t + 1) * 64 (the block after the tick that produced it).
+  m_a, m_b are the masses of body_a, body_b in that tick's BodyState
+  records (mass is constant per body; the tick's records are the
+  normative source). mu = (m_a * m_b) / (m_a + m_b) — the same operand
+  order as section 21.
+- Each contact excites three modes k = 0, 1, 2 with pinned per-mode
+  constants:
+  partial coefficients C = [1.0, 4.0, 9.0]
+  per-sample decay RHO = [0.9990, 0.9985, 0.9980]
+  excitation gain AMP = [0.5, 0.3, 0.2]
+  base OMEGA0 = 0.0004448824124529259
+  (OMEGA0 = (2*pi*220/65536)^2; mode 1 of a reduced-mass-1 contact
+  rings at 220 Hz; across the mass range modes span roughly 196-1320
+  Hz. These are pinned constants of the format, not derivations.)
+  omega_k = OMEGA0 * C[k] / mu
+  a_k = (2.0 - omega_k) * RHO[k];  b_k = RHO[k] * RHO[k]
+  Ring samples (second-order resonator recurrence, zero initial
+  velocity):
+  s_0 = AMP[k] * jn;  s_1 = a_k * s_0;
+  s_n = a_k * s_{n-1} - b_k * s_{n-2}   for n >= 2
+  Ring length L = 16384 samples.
+- Mixing: an f64 accumulator buffer of N = (T + 260) * 64 samples,
+  where T is the last TickHeader tick in the stream (260 blocks > L/64
+  so the last ring decays fully). For each Contact record in stream
+  order, for k = 0, 1, 2, for n = 0..L-1: buf[e + n] += s_n. This
+  accumulation order is normative.
+- Quantization: for each sample, v = min(max(buf[n], -1.0), 1.0);
+  pcm[n] = floor(v * 32767.0 + 0.5) as a signed 16-bit integer (floor,
+  not truncation — half-up rounding toward +infinity), serialized
+  little-endian.
+- Audio hash: FNV-1a64 (section 1) over the PCM data bytes only (the
+  data chunk payload, not the RIFF header).
+- Determinism: the synthesis uses only +, -, *, /, floor, and integer
+  conversion on f64 — no libm transcendentals — so conforming
+  implementations are bit-identical cross-platform, matching the
+  section 11 replay guarantee.
+
+CLI: `--contacts --wav FILE` additionally writes the synthesized WAV
+and prints `audio=<fnv1a64-of-pcm>` (16 hex digits) on the output line.
