@@ -1059,6 +1059,16 @@ impl GravityWorld {
         }
     }
 
+    fn mark_fine_moves(w: &GravityWorld, status: &mut [bool], left_fine: &mut [bool]) {
+        for i in 0..w.bodies.len() {
+            let fine = w.coarse[i].is_none() && w.collapsed[i].is_none();
+            if fine != status[i] {
+                left_fine[i] = true;
+                status[i] = fine;
+            }
+        }
+    }
+
     fn apply_event(&mut self, region: u8, action: Action) {
         let t = self.tick + 1;
         match action {
@@ -1126,12 +1136,31 @@ impl GravityWorld {
 
     pub fn step(&mut self) {
         let entering = self.tick + 1;
-        let pre_fine: Vec<bool> = (0..self.bodies.len())
+        // Section 21: a pair leaves the touching set when either member
+        // crosses the Fine/non-Fine boundary at any point during the
+        // boundary (demote, promote, collapse, expansion, refit thaw),
+        // even if the body ends the boundary back at its starting
+        // status (e.g. demote+promote or expand+recollapse on one
+        // tick), so a body that is Fine again while still overlapping
+        // begins a fresh contact. Marks accumulate per applied
+        // transition, not from final-vs-initial membership. A coarse
+        // body moving between coarse regions (e.g. absorbed into a
+        // foreign collapse) stays non-Fine and keeps its keys. Pseudo
+        // id keys of a collapsed region drop when the region leaves
+        // collapse during the boundary, even if it re-collapses.
+        let mut status: Vec<bool> = (0..self.bodies.len())
             .map(|i| self.coarse[i].is_none() && self.collapsed[i].is_none())
             .collect();
+        let mut left_fine = vec![false; status.len()];
+        let mut left_collapse = [false; 4];
         if let Some(events) = self.events.remove(&entering) {
             for &(region, action) in &events {
+                let was_collapsed = self.region_mode[region as usize] == RegionMode::Collapsed;
                 self.apply_event(region, action);
+                if was_collapsed && self.region_mode[region as usize] != RegionMode::Collapsed {
+                    left_collapse[region as usize] = true;
+                }
+                Self::mark_fine_moves(self, &mut status, &mut left_fine);
             }
         }
         if entering >= 17 && entering % 16 == 1 && self.observer.is_some() {
@@ -1147,6 +1176,7 @@ impl GravityWorld {
                 }
             }
             for &(region, to_coarse) in &fired {
+                let was_collapsed = self.region_mode[region as usize] == RegionMode::Collapsed;
                 self.apply_event(
                     region,
                     if to_coarse {
@@ -1155,6 +1185,10 @@ impl GravityWorld {
                         Action::Promote
                     },
                 );
+                if was_collapsed && self.region_mode[region as usize] != RegionMode::Collapsed {
+                    left_collapse[region as usize] = true;
+                }
+                Self::mark_fine_moves(self, &mut status, &mut left_fine);
             }
             self.observer
                 .as_mut()
@@ -1167,32 +1201,26 @@ impl GravityWorld {
                 && self.region_window_deadline[region as usize] == Some(entering)
             {
                 self.refit_region(region, entering);
+                Self::mark_fine_moves(self, &mut status, &mut left_fine);
             }
         }
 
-        // Section 21: a pair leaves the touching set when either member
-        // crosses the Fine/non-Fine boundary (demote, promote, collapse,
-        // expansion, window thaw), so a body that returns to Fine while
-        // still overlapping begins a fresh contact. Derived from actual
-        // pre/post membership: a coarse body moving between coarse
-        // regions (e.g. absorbed into a foreign collapse) stays non-Fine
-        // and keeps its keys. Pseudo-id keys (monopoles, walls) name no
-        // real body and drop naturally when detection stops.
-        if !self.touching.is_empty() {
-            let changed: Vec<bool> = (0..self.bodies.len())
-                .map(|i| {
-                    let fine = self.coarse[i].is_none() && self.collapsed[i].is_none();
-                    fine != pre_fine[i]
-                })
-                .collect();
-            if changed.iter().any(|&c| c) {
-                self.touching.retain(|&(a, b)| {
-                    let a_changed = (a as usize) < changed.len() && changed[a as usize];
-                    let b_changed =
-                        b < MONOPOLE_BASE && (b as usize) < changed.len() && changed[b as usize];
-                    !a_changed && !b_changed
-                });
-            }
+        if !self.touching.is_empty()
+            && (left_fine.iter().any(|&c| c) || left_collapse.iter().any(|&c| c))
+        {
+            self.touching.retain(|&(a, b)| {
+                if b >= MONOPOLE_BASE
+                    && b < WALL_BASE
+                    && (b - MONOPOLE_BASE) < 4
+                    && left_collapse[(b - MONOPOLE_BASE) as usize]
+                {
+                    return false;
+                }
+                let a_changed = (a as usize) < left_fine.len() && left_fine[a as usize];
+                let b_changed =
+                    b < MONOPOLE_BASE && (b as usize) < left_fine.len() && left_fine[b as usize];
+                !a_changed && !b_changed
+            });
         }
 
         let n = self.bodies.len();
@@ -2767,6 +2795,92 @@ mod tests {
         );
         assert_eq!((w.last_contacts[0].a, w.last_contacts[0].b), (0, 1));
         assert!(w.last_contacts[0].jn > 0.0);
+    }
+
+    #[test]
+    fn same_tick_demote_promote_invalidates_touching() {
+        // OTO-008: invalidation follows applied transitions, not final
+        // membership. A body demoted and re-promoted within one
+        // boundary keeps no stale touching keys, so the still-
+        // overlapping pair begins a fresh contact (record + impulse)
+        // even though its Fine status at the pass equals the status
+        // before the boundary.
+        let mut w = GravityWorld::new(11, 2);
+        w.bodies[0].mass = 2.0;
+        w.bodies[0].x = 62.0;
+        w.bodies[0].y = 32.0;
+        w.bodies[0].vx = 0.0;
+        w.bodies[0].vy = 0.0;
+        w.bodies[1].mass = 2.0;
+        w.bodies[1].x = 66.0;
+        w.bodies[1].y = 32.0;
+        w.bodies[1].vx = 0.0;
+        w.bodies[1].vy = 0.0;
+        w.contacts = true;
+        w.contact_params = true;
+        w.schedule(2, 1, Action::Demote);
+        w.schedule(2, 1, Action::Promote);
+        w.step();
+        assert_eq!(w.last_contacts.len(), 1, "contact begins at tick 1");
+        w.last_contacts.clear();
+        w.step();
+        assert_eq!(
+            w.last_contacts.len(),
+            1,
+            "demote+promote in one boundary still invalidates the pair"
+        );
+        assert_eq!((w.last_contacts[0].a, w.last_contacts[0].b), (0, 1));
+        assert!(w.last_contacts[0].jn > 0.0, "impulse fires and records");
+    }
+
+    #[test]
+    fn same_tick_expand_recollapse_invalidates_monopole_touching() {
+        // OTO-008: a region that expands and re-collapses within one
+        // boundary must drop its monopole pseudo-id touching keys, so a
+        // fine body still overlapping the reborn monopole begins a
+        // fresh contact. Final region mode (Collapsed) equals the
+        // pre-boundary mode, so final-vs-initial derivation kept the
+        // stale key and suppressed the record forever after.
+        let mut w = GravityWorld::new(11, 5);
+        for (slot, i) in (1..5).enumerate() {
+            w.bodies[i].x = 66.0 + (slot % 2) as f64;
+            w.bodies[i].y = 96.0 + ((slot / 2) as f64);
+            w.bodies[i].vx = 0.0;
+            w.bodies[i].vy = 0.0;
+        }
+        w.bodies[0].x = 63.5;
+        w.bodies[0].y = 96.0;
+        w.bodies[0].vx = 0.5;
+        w.bodies[0].vy = 0.0;
+        w.contacts = true;
+        w.contact_params = true;
+        w.schedule(1, 3, Action::Collapse);
+        w.schedule(3, 3, Action::Promote);
+        w.schedule(3, 3, Action::Collapse);
+        w.step();
+        let monopole = |w: &GravityWorld| {
+            w.last_contacts
+                .iter()
+                .filter(|c| c.b == MONOPOLE_BASE + 3)
+                .count()
+        };
+        assert_eq!(monopole(&w), 1, "monopole contact begins at tick 1");
+        w.last_contacts.clear();
+        w.step();
+        assert_eq!(monopole(&w), 0, "unchanged boundary stays silent");
+        w.last_contacts.clear();
+        w.step();
+        assert_eq!(
+            monopole(&w),
+            1,
+            "expand+recollapse in one boundary invalidates the pseudo key"
+        );
+        let c = w
+            .last_contacts
+            .iter()
+            .find(|c| c.b == MONOPOLE_BASE + 3)
+            .unwrap();
+        assert!(c.jn > 0.0);
     }
 
     #[test]
