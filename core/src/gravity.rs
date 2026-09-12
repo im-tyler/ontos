@@ -477,6 +477,12 @@ impl GravityWorld {
             })
             .collect();
         if members.is_empty() {
+            // Section 14 owes every demotion its t0 + WINDOW re-fit,
+            // empty ones included: the deadline is the only carrier of
+            // that obligation, and the empty re-fit path is what
+            // returns the region to Fine when it fires. Without it the
+            // region stays Coarse forever.
+            self.region_window_deadline[region as usize] = Some(t0 + WINDOW);
             self.region_mode[region as usize] = RegionMode::Coarse;
             return;
         }
@@ -3039,6 +3045,38 @@ mod tests {
         assert_eq!((region, level), (1, 2), "absorbed into region 1 collapse");
         assert!(w.coarse[0].is_none(), "old window discarded");
         assert!(b.x >= 60.0, "emitted near the collapsing box");
+    }
+
+    #[test]
+    fn empty_demote_refits_at_deadline() {
+        // OTO-012: a demotion with no in-box bodies still owes its
+        // t0 + WINDOW re-fit. The deadline must be armed so the empty
+        // re-fit path returns the region to Fine when it fires; before
+        // the fix the region stayed Coarse forever.
+        let mut w = GravityWorld::new(1, 1);
+        let b = &w.bodies[0];
+        assert!(
+            !(b.x < 64.0 && b.y < 64.0),
+            "seed 1 keeps body 0 outside region 0"
+        );
+        w.schedule(1, 0, Action::Demote);
+        w.step();
+        assert_eq!(w.tick, 1);
+        assert_eq!(w.region_mode[0], RegionMode::Coarse);
+        assert_eq!(w.region_window_deadline[0], Some(1 + WINDOW));
+        while w.tick < WINDOW {
+            w.step();
+        }
+        assert_eq!(w.tick, WINDOW);
+        assert_eq!(w.region_mode[0], RegionMode::Coarse, "before the deadline");
+        w.step();
+        assert_eq!(w.tick, 1 + WINDOW);
+        assert_eq!(
+            w.region_mode[0],
+            RegionMode::Fine,
+            "empty re-fit at deadline"
+        );
+        assert_eq!(w.region_window_deadline[0], None);
     }
 
     #[test]
