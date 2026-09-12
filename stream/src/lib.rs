@@ -110,6 +110,8 @@ pub enum Record {
 pub struct StreamWriter<W: Write> {
     out: W,
     format_version: u32,
+    seen_tick_header: bool,
+    seen_contact_params: bool,
 }
 
 impl<W: Write> StreamWriter<W> {
@@ -121,6 +123,8 @@ impl<W: Write> StreamWriter<W> {
         Ok(StreamWriter {
             out,
             format_version: FORMAT_VERSION,
+            seen_tick_header: false,
+            seen_contact_params: false,
         })
     }
 
@@ -138,6 +142,8 @@ impl<W: Write> StreamWriter<W> {
         Ok(StreamWriter {
             out,
             format_version: FORMAT_VERSION_GRAVITY,
+            seen_tick_header: false,
+            seen_contact_params: false,
         })
     }
 
@@ -191,6 +197,24 @@ impl<W: Write> StreamWriter<W> {
                         "record level {} exceeds format version {} maximum {}",
                         *level, self.format_version, max_level
                     ),
+                ));
+            }
+        }
+        // Section 24 placement rules, mirroring the reader (OTO-015):
+        // ContactParams is admitted at most once and only before the
+        // first TickHeader. A violating write appends no bytes; the
+        // flags are set only after a record serializes successfully.
+        if matches!(record, Record::ContactParams { .. }) {
+            if self.seen_contact_params {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate ContactParams record",
+                ));
+            }
+            if self.seen_tick_header {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ContactParams after the first TickHeader",
                 ));
             }
         }
@@ -401,7 +425,14 @@ impl<W: Write> StreamWriter<W> {
                 self.out.write_all(&b2.to_le_bytes())?;
                 self.out.write_all(&b3.to_le_bytes())
             }
+        }?;
+        if matches!(record, Record::ContactParams { .. }) {
+            self.seen_contact_params = true;
         }
+        if matches!(record, Record::TickHeader { .. }) {
+            self.seen_tick_header = true;
+        }
+        Ok(())
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
@@ -1290,6 +1321,49 @@ mod tests {
             w.write(&Record::TickHeader { tick: 0 }).unwrap();
         }
         assert_eq!(buf.len(), 20 + 9, "no payload bytes on params rejection");
+    }
+
+    #[test]
+    fn writer_rejects_duplicate_contact_params() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 8).unwrap();
+            w.write(&Record::ContactParams {
+                restitution: 0.5,
+                friction: 0.25,
+                walls: 0,
+            })
+            .unwrap();
+            let err = w
+                .write(&Record::ContactParams {
+                    restitution: 0.5,
+                    friction: 0.25,
+                    walls: 0,
+                })
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(err.to_string(), "duplicate ContactParams record");
+        }
+        assert_eq!(buf.len(), 21 + 17, "no bytes appended on the second write");
+    }
+
+    #[test]
+    fn writer_rejects_contact_params_after_tick_header() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 8).unwrap();
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
+            let err = w
+                .write(&Record::ContactParams {
+                    restitution: 0.5,
+                    friction: 0.25,
+                    walls: 0,
+                })
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(err.to_string(), "ContactParams after the first TickHeader");
+        }
+        assert_eq!(buf.len(), 20 + 9, "no bytes appended on the late write");
     }
 
     #[test]
