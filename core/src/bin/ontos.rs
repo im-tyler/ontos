@@ -21,6 +21,25 @@ fn parse_region(raw: &str) -> u32 {
     v
 }
 
+// Section 24: restitution lies in [0, 1], friction in [0, +inf); both
+// must be finite (NaN parses successfully, so a bare comparison is not
+// enough).
+fn parse_restitution(raw: &str) -> f64 {
+    let v: f64 = raw.parse().expect("invalid restitution");
+    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+        panic!("restitution out of range [0,1]: {v}");
+    }
+    v
+}
+
+fn parse_friction(raw: &str) -> f64 {
+    let v: f64 = raw.parse().expect("invalid friction");
+    if !v.is_finite() || v < 0.0 {
+        panic!("friction out of range [0,+inf): {v}");
+    }
+    v
+}
+
 fn level_byte(action: Action) -> u8 {
     match action {
         Action::Demote => 0,
@@ -88,19 +107,11 @@ fn main() {
                 i += 1;
             }
             "--restitution" => {
-                let v: f64 = args[i + 1].parse().expect("invalid restitution");
-                if !(0.0..=1.0).contains(&v) {
-                    panic!("restitution out of range [0,1]: {v}");
-                }
-                restitution = Some(v);
+                restitution = Some(parse_restitution(&args[i + 1]));
                 i += 2;
             }
             "--friction" => {
-                let v: f64 = args[i + 1].parse().expect("invalid friction");
-                if v < 0.0 {
-                    panic!("friction out of range: {v}");
-                }
-                friction = Some(v);
+                friction = Some(parse_friction(&args[i + 1]));
                 i += 2;
             }
             "--walls" => {
@@ -525,5 +536,60 @@ fn body_state_record(world: &GravityWorld, i: usize) -> Record {
         vx: b.vx,
         vy: b.vy,
         mass: b.mass,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_friction, parse_restitution};
+
+    #[test]
+    fn friction_accepts_finite_nonnegative() {
+        assert_eq!(parse_friction("0"), 0.0);
+        assert_eq!(parse_friction("0.25"), 0.25);
+        assert_eq!(parse_friction("1e9"), 1e9);
+    }
+
+    #[test]
+    #[should_panic(expected = "friction out of range")]
+    fn friction_rejects_nan() {
+        parse_friction("NaN");
+    }
+
+    #[test]
+    #[should_panic(expected = "friction out of range")]
+    fn friction_rejects_infinity() {
+        parse_friction("inf");
+    }
+
+    #[test]
+    #[should_panic(expected = "friction out of range")]
+    fn friction_rejects_negative() {
+        parse_friction("-0.5");
+    }
+
+    #[test]
+    fn restitution_accepts_unit_range() {
+        assert_eq!(parse_restitution("0"), 0.0);
+        assert_eq!(parse_restitution("0.5"), 0.5);
+        assert_eq!(parse_restitution("1"), 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "restitution out of range")]
+    fn restitution_rejects_nan() {
+        parse_restitution("NaN");
+    }
+
+    #[test]
+    #[should_panic(expected = "restitution out of range")]
+    fn restitution_rejects_infinity() {
+        parse_restitution("inf");
+    }
+
+    #[test]
+    #[should_panic(expected = "restitution out of range")]
+    fn restitution_rejects_out_of_range() {
+        parse_restitution("1.5");
     }
 }
