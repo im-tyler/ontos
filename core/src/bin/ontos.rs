@@ -216,8 +216,8 @@ fn main() {
             contacts,
             radial,
             shells,
-            restitution.unwrap_or(0.0),
-            friction.unwrap_or(0.0),
+            restitution,
+            friction,
             walls,
             wav,
             test_ic,
@@ -316,8 +316,8 @@ fn run_gravity(
     contacts: bool,
     radial: bool,
     shells: bool,
-    restitution: f64,
-    friction: f64,
+    restitution: Option<f64>,
+    friction: Option<f64>,
     walls: bool,
     wav: Option<PathBuf>,
     test_ic: Option<String>,
@@ -331,7 +331,12 @@ fn run_gravity(
     world.contacts = contacts;
     world.radial = radial;
     world.shells = shells;
-    let params = restitution != 0.0 || friction != 0.0 || walls;
+    // Section 24: option presence, not value — explicitly supplying
+    // either parameter (zeros included) emits ContactParams and enables
+    // the section 24 pass.
+    let params = restitution.is_some() || friction.is_some() || walls;
+    let restitution = restitution.unwrap_or(0.0);
+    let friction = friction.unwrap_or(0.0);
     if params {
         world.contact_params = true;
         world.restitution = restitution;
@@ -541,7 +546,76 @@ fn body_state_record(world: &GravityWorld, i: usize) -> Record {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_friction, parse_restitution};
+    use std::fs::File;
+
+    use ontos_stream::{Record, StreamReader};
+
+    use super::{parse_friction, parse_restitution, run_gravity};
+
+    fn written_records(name: &str, restitution: Option<f64>, friction: Option<f64>) -> Vec<Record> {
+        let path = std::env::temp_dir().join(name);
+        run_gravity(
+            2,
+            11,
+            Some(path.clone()),
+            8,
+            Vec::new(),
+            None,
+            true,
+            false,
+            false,
+            restitution,
+            friction,
+            false,
+            None,
+            None,
+        );
+        let mut records = Vec::new();
+        let mut reader = StreamReader::new(File::open(&path).unwrap()).unwrap();
+        while let Some(record) = reader.next_record().unwrap() {
+            records.push(record);
+        }
+        let _ = std::fs::remove_file(&path);
+        records
+    }
+
+    #[test]
+    fn explicit_zero_restitution_emits_contact_params() {
+        let records = written_records("otos_test_zero_restitution.stream", Some(0.0), None);
+        assert_eq!(
+            records.first(),
+            Some(&Record::ContactParams {
+                restitution: 0.0,
+                friction: 0.0,
+                walls: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_zero_friction_emits_contact_params() {
+        let records = written_records("otos_test_zero_friction.stream", None, Some(0.0));
+        assert_eq!(
+            records.first(),
+            Some(&Record::ContactParams {
+                restitution: 0.0,
+                friction: 0.0,
+                walls: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn bare_contacts_omit_contact_params() {
+        let records = written_records("otos_test_bare_contacts.stream", None, None);
+        assert!(records.contains(&Record::TickHeader { tick: 1 }));
+        records.iter().for_each(|r| {
+            assert!(
+                !matches!(r, Record::ContactParams { .. }),
+                "bare --contacts stays a section 21 stream"
+            );
+        });
+    }
 
     #[test]
     fn friction_accepts_finite_nonnegative() {
