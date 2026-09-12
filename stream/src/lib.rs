@@ -171,6 +171,29 @@ impl<W: Write> StreamWriter<W> {
                 ),
             ));
         }
+        // Level payloads are version-dependent: version 1 admits
+        // levels 0-1, version 2 admits 0-2 (the reader enforces the
+        // same bounds). Validate before serializing so a rejected
+        // record appends no bytes.
+        if let Record::RegionLevel { level, .. }
+        | Record::RegionState { level, .. }
+        | Record::BodyState { level, .. } = record
+        {
+            let max_level: u8 = if self.format_version >= FORMAT_VERSION_GRAVITY {
+                2
+            } else {
+                1
+            };
+            if *level > max_level {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "record level {} exceeds format version {} maximum {}",
+                        *level, self.format_version, max_level
+                    ),
+                ));
+            }
+        }
         match record {
             Record::Header { .. } => Ok(()),
             Record::TickHeader { tick } => {
@@ -818,17 +841,20 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut w = StreamWriter::new(&mut buf, 128, 128).unwrap();
-            w.write(&Record::RegionLevel {
-                region_x: 0,
-                region_y: 0,
-                level: 2,
-            })
-            .unwrap();
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
         }
+        // Handcraft a level-2 RegionLevel record after the v1 header
+        // (the writer itself rejects the level now).
+        buf.push(4u8);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.push(2u8);
+        let mut r = reader(&buf);
         assert_eq!(
-            reader(&buf).next_record().unwrap_err(),
-            ParseError::BadLevel(2)
+            r.next_record().unwrap(),
+            Some(Record::TickHeader { tick: 0 })
         );
+        assert_eq!(r.next_record().unwrap_err(), ParseError::BadLevel(2));
     }
 
     #[test]
@@ -953,20 +979,20 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 4).unwrap();
-            w.write(&Record::RegionLevel {
-                region_x: 0,
-                region_y: 0,
-                level: 3,
-            })
-            .unwrap();
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
         }
+        // Handcraft a level-3 RegionLevel record after the v2 header
+        // (the writer itself rejects the level now).
+        buf.push(4u8);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.push(3u8);
+        let mut r = StreamReader::new(&buf[..]).unwrap();
         assert_eq!(
-            StreamReader::new(&buf[..])
-                .unwrap()
-                .next_record()
-                .unwrap_err(),
-            ParseError::BadLevel(3)
+            r.next_record().unwrap(),
+            Some(Record::TickHeader { tick: 0 })
         );
+        assert_eq!(r.next_record().unwrap_err(), ParseError::BadLevel(3));
     }
 
     #[test]
@@ -1241,6 +1267,74 @@ mod tests {
             r.next_record().unwrap(),
             Some(Record::Snapshot { population: 5 })
         );
+    }
+
+    #[test]
+    fn v1_writer_rejects_level_two_before_serializing() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new(&mut buf, 128, 128).unwrap();
+            let err = w
+                .write(&Record::RegionLevel {
+                    region_x: 0,
+                    region_y: 0,
+                    level: 2,
+                })
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            let err = w
+                .write(&Record::RegionState {
+                    tick: 1,
+                    region_x: 0,
+                    region_y: 0,
+                    level: 2,
+                    population: 0,
+                    hash: 0,
+                })
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
+        }
+        assert_eq!(buf.len(), 16 + 9, "no payload bytes on level rejection");
+    }
+
+    #[test]
+    fn v2_writer_rejects_level_three_before_serializing() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 4).unwrap();
+            for rec in [
+                Record::RegionLevel {
+                    region_x: 0,
+                    region_y: 0,
+                    level: 3,
+                },
+                Record::RegionState {
+                    tick: 1,
+                    region_x: 0,
+                    region_y: 0,
+                    level: 3,
+                    population: 0,
+                    hash: 0,
+                },
+                Record::BodyState {
+                    tick: 1,
+                    body_id: 0,
+                    region: 0,
+                    level: 3,
+                    x: 0.0,
+                    y: 0.0,
+                    vx: 0.0,
+                    vy: 0.0,
+                    mass: 0.0,
+                },
+            ] {
+                let err = w.write(&rec).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{rec:?}");
+            }
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
+        }
+        assert_eq!(buf.len(), 20 + 9, "no payload bytes on level rejection");
     }
 
     #[test]
