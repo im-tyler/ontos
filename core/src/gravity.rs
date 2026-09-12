@@ -1127,7 +1127,7 @@ impl GravityWorld {
                 let mode = self.region_mode[region as usize];
                 if mode == RegionMode::Fine && d > 48.0 {
                     fired.push((region, true));
-                } else if mode != RegionMode::Fine && d < 24.0 {
+                } else if mode == RegionMode::Coarse && d < 24.0 {
                     fired.push((region, false));
                 }
             }
@@ -2681,6 +2681,37 @@ mod tests {
             b.step();
         }
         assert_ne!(a.world_hash(), b.world_hash());
+    }
+
+    #[test]
+    fn zoom_policy_promotes_coarse_not_collapsed() {
+        // Section 18: only Coarse regions promote under zoom; a collapsed
+        // region leaves collapse only via an explicit expansion event.
+        // seed 13 / offset 42 / region 0 is the corpus case whose golden
+        // pinned the wrong behavior: the observer focus entered the box
+        // near tick 49 and zoom-expanded the collapse.
+        let mut coarse = GravityWorld::new(13, 12);
+        coarse.set_observer(42);
+        coarse.schedule(40, 0, Action::Demote);
+        for _ in 0..300 {
+            coarse.step();
+        }
+        assert_eq!(
+            coarse.region_mode[0],
+            RegionMode::Fine,
+            "coarse region zoom-promotes when the focus approaches"
+        );
+        let mut collapsed = GravityWorld::new(13, 12);
+        collapsed.set_observer(42);
+        collapsed.schedule(40, 0, Action::Collapse);
+        for _ in 0..300 {
+            collapsed.step();
+        }
+        assert_eq!(
+            collapsed.region_mode[0],
+            RegionMode::Collapsed,
+            "zoom policy must not expand a collapsed region"
+        );
     }
 
     #[test]
