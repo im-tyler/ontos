@@ -942,11 +942,13 @@ impl GravityWorld {
                 (lo + hi) * 0.5
             }
         };
-        let lam = solve(&all_pairs, t.binding);
-        for b in base.iter_mut() {
-            b.0 *= lam;
-            b.1 *= lam;
-        }
+        // Section 25 pins the order: classify the base (step 2) before
+        // the global scale (step 3). The mass-weighted mean and radii
+        // come from the UNSCALED section 20 displacements and the
+        // shells vector is retained for the per-shell solves — solving
+        // and applying lambda first can flip rank near-ties under
+        // binary64 rounding (scaled radii about the scaled mean are not
+        // exactly the unscaled radii), changing shell membership.
         let mut swx = 0.0f64;
         let mut swy = 0.0f64;
         for (slot, &i) in members.iter().enumerate() {
@@ -965,6 +967,11 @@ impl GravityWorld {
             })
             .collect();
         let shells = shell_assignment(&radii);
+        let lam = solve(&all_pairs, t.binding);
+        for b in base.iter_mut() {
+            b.0 *= lam;
+            b.1 *= lam;
+        }
         let s = shell_count(n);
         let mut pairs: Vec<Vec<(f64, f64)>> = vec![Vec::new(); s];
         for a in 0..n {
@@ -2949,6 +2956,140 @@ mod tests {
         let dipole_scale = rec.mx.abs().max(rec.my.abs()).max(1e-30);
         let dipole = (sx - rec.mx).abs().max((sy - rec.my).abs()) / dipole_scale;
         assert!(dipole < 1e-12, "dipole residual {dipole}");
+    }
+
+    #[test]
+    fn shells_classification_precedes_global_scale() {
+        // OTO-017: section 25 step 2 classifies the UNSCALED base before
+        // step 3 applies the global lambda. The frozen 12-member layout
+        // below (adjacent +/- pairs, unit masses, so the mass-weighted
+        // mean is exactly zero scaled and unscaled) carries an exact
+        // radius tie — members 4/5 (+/-(4,13)) and 6/7 (+/-(8,11)) all
+        // sit at r = sqrt(185) — straddling the shell-1/shell-2
+        // boundary. Unscaled, the tie resolves by id (4,5 in shell 1);
+        // under the solved lambda (bits pinned below) the scaled radii
+        // round apart with (8,11) below (4,13), so classifying after the
+        // scale would swap the pairs across the boundary. Constants were
+        // hunted once offline against the pinned 128-bisection and
+        // verified at the solved lambda and its nextafter neighbors.
+        let mut w = GravityWorld::new(9, 12);
+        for b in w.bodies.iter_mut() {
+            b.mass = 1.0;
+        }
+        let base: Vec<(f64, f64)> = vec![
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (2.0, 1.0),
+            (-2.0, -1.0),
+            (4.0, 13.0),
+            (-4.0, -13.0),
+            (8.0, 11.0),
+            (-8.0, -11.0),
+            (16.0, 16.0),
+            (-16.0, -16.0),
+            (18.0, 18.0),
+            (-18.0, -18.0),
+        ];
+        let t = CollapseTotals {
+            tick: 40,
+            region: 2,
+            count: 12,
+            mass: 12.0,
+            com_x: 0.0,
+            com_y: 0.0,
+            px: 0.0,
+            py: 0.0,
+            energy: 0.0,
+            vcom_x: 0.0,
+            vcom_y: 0.0,
+            mx: 0.0,
+            my: 0.0,
+            qxx: 0.0,
+            qxy: 0.0,
+            qyy: 0.0,
+            binding: 31.449361063651804,
+            radial: false,
+            shells: true,
+            shell_bindings: [
+                2.8963589184073895,
+                1.35434973735769,
+                1.193364772721091,
+                1.28597484643118,
+            ],
+        };
+        let members: Vec<usize> = (0..12).collect();
+        let mut work = base.clone();
+        let (_, groups) = w.shell_scale(&members, &t, &mut work);
+        // Spec classification: unscaled radii about the unscaled mean.
+        let mut swx = 0.0f64;
+        let mut swy = 0.0f64;
+        for &(x, y) in &base {
+            swx += x;
+            swy += y;
+        }
+        let cx = swx / t.mass;
+        let cy = swy / t.mass;
+        let unscaled: Vec<f64> = base
+            .iter()
+            .map(|&(x, y)| {
+                let dx = x - cx;
+                let dy = y - cy;
+                (dx * dx + dy * dy).sqrt()
+            })
+            .collect();
+        let want = shell_assignment(&unscaled);
+        let mut want_groups: Vec<Vec<u32>> = vec![Vec::new(); 4];
+        for (slot, shell) in want.iter().enumerate() {
+            want_groups[*shell].push(slot as u32);
+        }
+        assert_eq!(groups, want_groups, "pre-scale classification wins");
+        // Premise guard: the tie is exact unscaled and breaks under the
+        // solved scale, so the post-scale classification differs — the
+        // test genuinely pins the order.
+        let lam = f64::from_bits(0x3fbe3bcd35a85906);
+        let rc = {
+            let sx = lam * 4.0;
+            let sy = lam * 13.0;
+            (sx * sx + sy * sy).sqrt()
+        };
+        let rd = {
+            let sx = lam * 8.0;
+            let sy = lam * 11.0;
+            (sx * sx + sy * sy).sqrt()
+        };
+        assert_eq!(unscaled[4].to_bits(), unscaled[6].to_bits());
+        assert!(
+            rd < rc,
+            "scaled rounding must break the tie toward (8,11): {rd} !< {rc}"
+        );
+        let scaled: Vec<f64> = base
+            .iter()
+            .map(|&(x, y)| {
+                let sx = lam * x;
+                let sy = lam * y;
+                (sx * sx + sy * sy).sqrt()
+            })
+            .collect();
+        assert_ne!(
+            shell_assignment(&scaled),
+            want,
+            "post-scale classification must differ for the premise to bite"
+        );
+        // Secondary: the per-shell solves close on the record targets
+        // with the pre-scale classification retained.
+        for (k, group) in groups.iter().enumerate() {
+            let mut binding = 0.0f64;
+            for a in 0..group.len() {
+                for b in (a + 1)..group.len() {
+                    let dx = work[group[b] as usize].0 - work[group[a] as usize].0;
+                    let dy = work[group[b] as usize].1 - work[group[a] as usize].1;
+                    binding += 1.0 / (dx * dx + dy * dy + 1.0).sqrt();
+                }
+            }
+            let target = t.shell_bindings[k];
+            let rel = (binding - target).abs() / target.abs().max(1e-30);
+            assert!(rel < 1e-9, "shell {k} residual {rel}");
+        }
     }
 
     #[test]
