@@ -845,12 +845,18 @@ no solver tolerance. The parameters travel in the stream.
   rule.) In an all-fine unbounded run the ledger stays exactly
   invariant for any e and friction.
 
-- Coarse bodies as contactants: the pair (i fine, j ephemeris-coarse)
-  joins the section 21 lexicographic sweep (section 21 skipped it).
-  j's position and velocity are its polynomial evaluations at the
-  tick; the resolution is one-sided on i. Coarse-coarse pairs are
-  skipped (no movable member). Collapsed member bodies never
-  participate individually; their region contacts as a monopole.
+- Coarse bodies as contactants: every unordered pair with one fine
+  member i and one ephemeris-coarse member j joins the section 21
+  lexicographic sweep in pinned (min_id, max_id) order (section 21
+  skipped the pair entirely). Membership is positional, not
+  id-constrained: the pair is reachable whichever member carries the
+  smaller id. The coarse member's position and velocity are its
+  polynomial evaluations at the tick; the resolution is one-sided on
+  the fine member, with the normal and relative-velocity operands
+  taken from the fine body toward the coarse contactant.
+  Coarse-coarse pairs are skipped (no movable member). Collapsed
+  member bodies never participate individually; their region
+  contacts as a monopole.
 
 - Collapsed-region monopoles as contactants: after all body pairs,
   for each collapsed region r = 0..3 with body_count > 0, in region
@@ -881,12 +887,16 @@ no solver tolerance. The parameters travel in the stream.
   order — body pairs lexicographic (including fine x coarse static
   pairs, in the same sweep), then monopole contacts in region order
   (body id order within a region), then wall contacts in body id
-  order (wall order within a body). Static contactants are named by
-  pseudo ids in body_b:
+  order (wall order within a body). Real-body Contact records
+  (fine-fine and fine x coarse) carry (body_a, body_b) =
+  (min_id, max_id) in the sweep's pinned id order — a fine x coarse
+  static record may therefore name the coarse body in body_a when it
+  carries the smaller id. body_a is the fine body only for pseudo-id
+  contacts, which name the contactant in body_b:
   collapsed-region monopole of region r: body_b = 0xFF000000 + r
   walls x=0, x=128, y=0, y=128: body_b = 0xFFFFFF00 + 0..3
-  body_a is always the fine body (real ids are small, so a < b
-  holds). jn is the applied normal impulse magnitude (jn > 0); cx,
+  (real ids are small, so a < b holds there). jn is the applied
+  normal impulse magnitude (jn > 0); cx,
   cy the contact point above; the tick field is the tick whose pass
   produced the event. The touching-set rule of section 21 extends
   verbatim with keys (body_a, body_b) including pseudo ids: pairs

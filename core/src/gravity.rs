@@ -243,13 +243,13 @@ pub fn initial_conditions(seed: u64, count: u32) -> Vec<Body> {
 // coarsehit (count 8): bodies 0..3 are interceptors outside the
 // region-3 box aimed straight at the cluster at 56..72; bodies 4..7
 // are a slow target cluster around (86, 89) spread over y lanes
-// 77 + 8*lane. Interceptors carry the smaller ids on purpose: the
-// section 21/24 sweep is lexicographic with the fine body as the
-// outer index, so a fine x ephemeris-coarse static pair only ever
-// fires as (fine i, coarse j) with i < j. Same-lane |dy| <= 2 < min
-// contact radius guarantees each interceptor a static contact once
-// region 3 is demoted early; the 9-unit lane spacing keeps
-// interceptors from contacting each other.
+// 77 + 8*lane. Interceptors carry the smaller ids so the corpus
+// exercises the fine-low static arm (fine i, coarse j) of the
+// section 24 sweep; the reversed id order (coarse contactant below
+// the fine body) is pinned by unit regression instead. Same-lane
+// |dy| <= 2 < min contact radius guarantees each interceptor a
+// static contact once region 3 is demoted early; the 9-unit lane
+// spacing keeps interceptors from contacting each other.
 #[doc(hidden)]
 pub fn corpus_initial_conditions(profile: &str, seed: u64, count: u32) -> Vec<Body> {
     let mut rng = SplitMix64::new(seed);
@@ -1329,20 +1329,33 @@ impl GravityWorld {
         let suppress = self.contact_armed;
         let mut next = BTreeSet::new();
         let mut events = Vec::new();
+        // Section 24: the sweep visits every unordered real-body pair
+        // once in pinned (i, j) id order and dispatches on membership —
+        // a fine body resolving against an ephemeris-coarse contactant
+        // is reachable whichever member carries the smaller id. Only
+        // (fine, fine), (fine, coarse), and — with the section 24
+        // record — (coarse, fine) pairs proceed; collapsed members
+        // never contact individually (their region contacts as a
+        // monopole), coarse-coarse pairs have no movable member, and
+        // without the record non-fine bodies never contact (section 21).
         for i in 0..n {
-            if kind[i] != 0 {
-                continue;
-            }
             for j in (i + 1)..n {
-                if kind[j] == 2 {
-                    continue;
+                match (kind[i], kind[j]) {
+                    (0, 0) | (0, 1) => {}
+                    (1, 0) if extended => {}
+                    _ => continue,
                 }
-                if kind[j] != 0 && !extended {
-                    continue;
-                }
-                let sj = self.body_state_at(j, entering);
-                let dx = sj.x - self.bodies[i].x;
-                let dy = sj.y - self.bodies[i].y;
+                // f is the fine member; so is the other member's state
+                // at the tick (polynomial evaluation for a coarse
+                // contactant, integrated state for a fine pair). The
+                // normal points from the fine body toward the contactant.
+                let (f, so) = if kind[i] == 0 {
+                    (i, self.body_state_at(j, entering))
+                } else {
+                    (j, self.body_state_at(i, entering))
+                };
+                let dx = so.x - self.bodies[f].x;
+                let dy = so.y - self.bodies[f].y;
                 let rs = radii[i] + radii[j];
                 let d2 = dx * dx + dy * dy;
                 if d2 >= rs * rs {
@@ -1356,17 +1369,17 @@ impl GravityWorld {
                     let dist = d2.sqrt();
                     (dx / dist, dy / dist)
                 };
-                let vrx = sj.vx - self.bodies[i].vx;
-                let vry = sj.vy - self.bodies[i].vy;
+                let vrx = so.vx - self.bodies[f].vx;
+                let vry = so.vy - self.bodies[f].vy;
                 let vn = vrx * nx + vry * ny;
                 if vn >= 0.0 {
                     continue;
                 }
                 let mi = self.bodies[i].mass;
                 let mj = self.bodies[j].mass;
-                let cx = (self.bodies[i].x + sj.x) * 0.5;
-                let cy = (self.bodies[i].y + sj.y) * 0.5;
-                let (jn, mu) = if kind[j] == 0 {
+                let cx = (self.bodies[f].x + so.x) * 0.5;
+                let cy = (self.bodies[f].y + so.y) * 0.5;
+                let (jn, mu) = if kind[i] == 0 && kind[j] == 0 {
                     let inv = 1.0 / (mi + mj);
                     let t = vn * inv;
                     let s = (1.0 + e) * t;
@@ -1397,18 +1410,20 @@ impl GravityWorld {
                     }
                     (jn, mu)
                 } else {
-                    let (_, jn) = self.static_impulse(i, nx, ny, vrx, vry);
+                    let (_, jn) = self.static_impulse(f, nx, ny, vrx, vry);
                     (jn, (mi * mj) / (mi + mj))
                 };
                 if suppress && self.touching.contains(&pair) {
                     continue;
                 }
-                let (jvx, jvy) = if kind[j] == 0 {
-                    (self.bodies[j].vx, self.bodies[j].vy)
+                let vn_after = if kind[i] == 0 && kind[j] == 0 {
+                    (self.bodies[j].vx - self.bodies[i].vx) * nx
+                        + (self.bodies[j].vy - self.bodies[i].vy) * ny
                 } else {
-                    (sj.vx, sj.vy)
+                    // The frozen contactant is measured at its
+                    // polynomial evaluation, never at a stale slot.
+                    (so.vx - self.bodies[f].vx) * nx + (so.vy - self.bodies[f].vy) * ny
                 };
-                let vn_after = (jvx - self.bodies[i].vx) * nx + (jvy - self.bodies[i].vy) * ny;
                 events.push(ContactEvent {
                     tick: entering,
                     a: i as u32,
@@ -2733,6 +2748,119 @@ mod tests {
                 assert_eq!(a.mass.to_bits(), b.mass.to_bits());
             }
         }
+    }
+
+    #[test]
+    fn static_contact_fires_when_coarse_body_has_smaller_id() {
+        // OTO-016: section 24 static contact is positional — the sweep
+        // must reach a fine body resolving against an ephemeris-coarse
+        // contactant even when the coarse body carries the smaller id.
+        // Seed 117: body 1 sits in region (0,1) (index 2) and is demoted
+        // at tick 1; fine body 3 outside the box overlaps the sum of
+        // radii inbound. The old sweep skipped the pair (the outer index
+        // had to be fine), letting body 3 fall through the frozen body.
+        let setup = |contacts: bool| {
+            let mut w = GravityWorld::new(117, 4);
+            w.bodies[0].mass = 0.5;
+            w.bodies[0].x = 16.0;
+            w.bodies[0].y = 16.0;
+            w.bodies[0].vx = 0.0;
+            w.bodies[0].vy = 0.0;
+            w.bodies[1].mass = 2.0;
+            w.bodies[1].x = 32.0;
+            w.bodies[1].y = 65.0;
+            w.bodies[1].vx = 0.0;
+            w.bodies[1].vy = 0.0;
+            w.bodies[2].mass = 0.5;
+            w.bodies[2].x = 112.0;
+            w.bodies[2].y = 16.0;
+            w.bodies[2].vx = 0.0;
+            w.bodies[2].vy = 0.0;
+            w.bodies[3].mass = 2.0;
+            w.bodies[3].x = 32.0;
+            w.bodies[3].y = 63.0;
+            w.bodies[3].vx = 0.0;
+            w.bodies[3].vy = 0.25;
+            w.contacts = contacts;
+            w.contact_params = contacts;
+            w.schedule(1, 2, Action::Demote);
+            w
+        };
+        let mut ctl = setup(false);
+        let mut w = setup(true);
+        ctl.step();
+        w.step();
+        assert_eq!(ctl.last_contacts.len(), 0);
+        assert_eq!(
+            w.last_contacts.len(),
+            1,
+            "the (coarse 1, fine 3) pair fires"
+        );
+        let c = w.last_contacts[0];
+        assert_eq!((c.a, c.b), (1, 3), "record ids in pinned (min, max) order");
+        assert!(c.jn > 0.0);
+        assert!(
+            c.vn_after.abs() < 1e-12,
+            "e = 0 closure, vn_after {}",
+            c.vn_after
+        );
+        assert!(w.touching.contains(&(1, 3)));
+        let fit_equal = |a: &Option<Fit>, b: &Option<Fit>| match (a, b) {
+            (Some(x), Some(y)) => {
+                x.t0 == y.t0
+                    && x.c.iter().zip(y.c.iter()).all(|(ca, cb)| {
+                        ca.iter()
+                            .zip(cb.iter())
+                            .all(|(u, v)| u.to_bits() == v.to_bits())
+                    })
+            }
+            _ => false,
+        };
+        assert!(
+            fit_equal(&w.coarse[1], &ctl.coarse[1]),
+            "fit identical to the no-contact run"
+        );
+        // Body 3 receives exactly the one-sided impulse: its pre-impulse
+        // state is the control run's (identical history up to the pass).
+        let s1 = w.body_state_at(1, 1);
+        let p3 = ctl.bodies[3];
+        let dx = s1.x - p3.x;
+        let dy = s1.y - p3.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        let nx = dx / dist;
+        let ny = dy / dist;
+        let vrx = s1.vx - p3.vx;
+        let vry = s1.vy - p3.vy;
+        let vn = vrx * nx + vry * ny;
+        let s = (1.0 + w.restitution) * vn;
+        let m3 = w.bodies[3].mass;
+        assert_eq!(
+            w.bodies[3].vx.to_bits(),
+            (p3.vx + s * nx).to_bits(),
+            "body 3 vx changed by exactly s * nx"
+        );
+        assert_eq!(
+            w.bodies[3].vy.to_bits(),
+            (p3.vy + s * ny).to_bits(),
+            "body 3 vy changed by exactly s * ny"
+        );
+        // The ledger books exactly the one-sided impulse (the fc-kick
+        // bookings of the demoted body are shared with the control run).
+        assert_eq!(
+            w.px.to_bits(),
+            (ctl.px + m3 * (s * nx)).to_bits(),
+            "ledger px books the static impulse"
+        );
+        assert_eq!(
+            w.py.to_bits(),
+            (ctl.py + m3 * (s * ny)).to_bits(),
+            "ledger py books the static impulse"
+        );
+        let frozen = w.coarse[1].clone().expect("fit");
+        for _ in 0..8 {
+            w.step();
+        }
+        assert!(fit_equal(&w.coarse[1], &Some(frozen)), "fit stays frozen");
     }
 
     #[test]
