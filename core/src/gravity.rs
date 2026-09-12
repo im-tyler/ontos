@@ -12,6 +12,9 @@ pub const UNMANAGED: u8 = 255;
 pub const CONTACT_R: f64 = 2.0;
 pub const MONOPOLE_BASE: u32 = 0xFF00_0000;
 pub const WALL_BASE: u32 = 0xFFFF_FF00;
+// 2^-64 with exact bits; the u64-to-unit-interval scale is a plain
+// multiply by this constant (section 11 arithmetic closure).
+pub const U64_UNIT: f64 = f64::from_bits(0x3BF0_0000_0000_0000);
 
 pub struct SplitMix64 {
     state: u64,
@@ -134,8 +137,8 @@ impl Observer {
             let u0 = rng.draw();
             let u1 = rng.draw();
             points.push((
-                16.0 + (u0 as f64) * 2.0f64.powi(-64) * 96.0,
-                16.0 + (u1 as f64) * 2.0f64.powi(-64) * 96.0,
+                16.0 + (u0 as f64) * U64_UNIT * 96.0,
+                16.0 + (u1 as f64) * U64_UNIT * 96.0,
             ));
         }
         Observer {
@@ -151,8 +154,8 @@ impl Observer {
             let u0 = self.rng.draw();
             let u1 = self.rng.draw();
             self.points.push((
-                16.0 + (u0 as f64) * 2.0f64.powi(-64) * 96.0,
-                16.0 + (u1 as f64) * 2.0f64.powi(-64) * 96.0,
+                16.0 + (u0 as f64) * U64_UNIT * 96.0,
+                16.0 + (u1 as f64) * U64_UNIT * 96.0,
             ));
         }
         let p0 = self.points[k];
@@ -215,11 +218,11 @@ pub fn initial_conditions(seed: u64, count: u32) -> Vec<Body> {
         let u4 = rng.draw();
         bodies.push(Body {
             id,
-            mass: 0.5 + (u0 as f64) * 2.0f64.powi(-64) * 2.0,
-            x: 32.0 + (u1 as f64) * 2.0f64.powi(-64) * 64.0,
-            y: 32.0 + (u2 as f64) * 2.0f64.powi(-64) * 64.0,
-            vx: ((u3 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5,
-            vy: ((u4 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5,
+            mass: 0.5 + (u0 as f64) * U64_UNIT * 2.0,
+            x: 32.0 + (u1 as f64) * U64_UNIT * 64.0,
+            y: 32.0 + (u2 as f64) * U64_UNIT * 64.0,
+            vx: ((u3 as f64) * U64_UNIT - 0.5) * 0.5,
+            vy: ((u4 as f64) * U64_UNIT - 0.5) * 0.5,
         });
     }
     bodies
@@ -256,11 +259,11 @@ pub fn corpus_initial_conditions(profile: &str, seed: u64, count: u32) -> Vec<Bo
         let u2 = rng.draw();
         let u3 = rng.draw();
         let u4 = rng.draw();
-        let mass = 0.5 + (u0 as f64) * 2.0f64.powi(-64) * 2.0;
-        let along = 16.0 + (u1 as f64) * 2.0f64.powi(-64) * 96.0;
-        let off = (u2 as f64) * 2.0f64.powi(-64) * 2.0;
-        let speed = 2.0 + (u3 as f64) * 2.0f64.powi(-64) * 3.0;
-        let drift = ((u4 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5;
+        let mass = 0.5 + (u0 as f64) * U64_UNIT * 2.0;
+        let along = 16.0 + (u1 as f64) * U64_UNIT * 96.0;
+        let off = (u2 as f64) * U64_UNIT * 2.0;
+        let speed = 2.0 + (u3 as f64) * U64_UNIT * 3.0;
+        let drift = ((u4 as f64) * U64_UNIT - 0.5) * 0.5;
         let (x, y, vx, vy) = match profile {
             "wallshot" => match id % 4 {
                 0 => (2.0 + off, along, 0.0 - speed, drift),
@@ -269,20 +272,20 @@ pub fn corpus_initial_conditions(profile: &str, seed: u64, count: u32) -> Vec<Bo
                 _ => (along, 124.0 + off, drift, speed),
             },
             "coarsehit" => {
-                let lane = 77.0 + 8.0 * ((id % 4) as f64) + (u2 as f64) * 2.0f64.powi(-64) * 2.0;
+                let lane = 77.0 + 8.0 * ((id % 4) as f64) + (u2 as f64) * U64_UNIT * 2.0;
                 if id < 4 {
                     (
-                        56.0 + (u1 as f64) * 2.0f64.powi(-64) * 4.0,
+                        56.0 + (u1 as f64) * U64_UNIT * 4.0,
                         lane,
-                        56.0 + (u3 as f64) * 2.0f64.powi(-64) * 16.0,
-                        ((u4 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5,
+                        56.0 + (u3 as f64) * U64_UNIT * 16.0,
+                        ((u4 as f64) * U64_UNIT - 0.5) * 0.5,
                     )
                 } else {
                     (
-                        84.0 + (u1 as f64) * 2.0f64.powi(-64) * 4.0,
+                        84.0 + (u1 as f64) * U64_UNIT * 4.0,
                         lane,
-                        ((u3 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5,
-                        ((u4 as f64) * 2.0f64.powi(-64) - 0.5) * 0.5,
+                        ((u3 as f64) * U64_UNIT - 0.5) * 0.5,
+                        ((u4 as f64) * U64_UNIT - 0.5) * 0.5,
                     )
                 }
             }
@@ -624,8 +627,8 @@ impl GravityWorld {
             let ux = rng.draw();
             let uy = rng.draw();
             jitter.push((
-                ((ux as f64) * 2.0f64.powi(-64) - 0.5) * 8.0,
-                ((uy as f64) * 2.0f64.powi(-64) - 0.5) * 8.0,
+                ((ux as f64) * U64_UNIT - 0.5) * 8.0,
+                ((uy as f64) * U64_UNIT - 0.5) * 8.0,
             ));
         }
         let mut spread = Vec::with_capacity(members.len());
@@ -633,8 +636,8 @@ impl GravityWorld {
             let ux = rng.draw();
             let uy = rng.draw();
             spread.push((
-                ((ux as f64) * 2.0f64.powi(-64) - 0.5) * 0.1,
-                ((uy as f64) * 2.0f64.powi(-64) - 0.5) * 0.1,
+                ((ux as f64) * U64_UNIT - 0.5) * 0.1,
+                ((uy as f64) * U64_UNIT - 0.5) * 0.1,
             ));
         }
         for (slot, &i) in members.iter().enumerate() {
@@ -1786,6 +1789,12 @@ fn cholesky_solve(g: &[[f64; 9]; 9], b: &[f64; 9]) -> [f64; 9] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u64_unit_has_exact_bits() {
+        assert_eq!(U64_UNIT.to_bits(), 0x3bf0_0000_0000_0000);
+        assert_eq!(2.0f64.powi(-64).to_bits(), U64_UNIT.to_bits());
+    }
 
     #[test]
     fn splitmix64_reference() {
