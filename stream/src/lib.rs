@@ -109,6 +109,7 @@ pub enum Record {
 
 pub struct StreamWriter<W: Write> {
     out: W,
+    format_version: u32,
 }
 
 impl<W: Write> StreamWriter<W> {
@@ -117,7 +118,10 @@ impl<W: Write> StreamWriter<W> {
         out.write_all(&FORMAT_VERSION.to_le_bytes())?;
         out.write_all(&world_w.to_le_bytes())?;
         out.write_all(&world_h.to_le_bytes())?;
-        Ok(StreamWriter { out })
+        Ok(StreamWriter {
+            out,
+            format_version: FORMAT_VERSION,
+        })
     }
 
     pub fn new_gravity(
@@ -131,10 +135,42 @@ impl<W: Write> StreamWriter<W> {
         out.write_all(&world_w.to_le_bytes())?;
         out.write_all(&world_h.to_le_bytes())?;
         out.write_all(&body_count.to_le_bytes())?;
-        Ok(StreamWriter { out })
+        Ok(StreamWriter {
+            out,
+            format_version: FORMAT_VERSION_GRAVITY,
+        })
+    }
+
+    pub fn format_version(&self) -> u32 {
+        self.format_version
     }
 
     pub fn write(&mut self, record: &Record) -> io::Result<()> {
+        let min_version = match record {
+            Record::Header { .. }
+            | Record::TickHeader { .. }
+            | Record::Snapshot { .. }
+            | Record::CellFlipped { .. }
+            | Record::RegionLevel { .. }
+            | Record::RegionState { .. } => FORMAT_VERSION,
+            Record::BodyState { .. }
+            | Record::TotalsState { .. }
+            | Record::RegionCollapsed { .. }
+            | Record::RegionMultipole { .. }
+            | Record::Contact { .. }
+            | Record::RegionRadial { .. }
+            | Record::ContactParams { .. }
+            | Record::RegionShells { .. } => FORMAT_VERSION_GRAVITY,
+        };
+        if self.format_version < min_version {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "record requires format version {min_version}, writer is version {}",
+                    self.format_version
+                ),
+            ));
+        }
         match record {
             Record::Header { .. } => Ok(()),
             Record::TickHeader { tick } => {
@@ -332,6 +368,7 @@ pub enum ParseError {
     BadMagic,
     BadVersion(u32),
     UnknownTag(u8),
+    TagNotAdmitted { tag: u8, version: u32 },
     Truncated,
     BadLevel(u8),
     BadWalls(u8),
@@ -350,6 +387,12 @@ impl std::fmt::Display for ParseError {
             ParseError::BadMagic => write!(f, "bad magic"),
             ParseError::BadVersion(v) => write!(f, "unsupported format version {v}"),
             ParseError::UnknownTag(t) => write!(f, "unknown record tag {t}"),
+            ParseError::TagNotAdmitted { tag, version } => {
+                write!(
+                    f,
+                    "record tag {tag} not admitted by format version {version}"
+                )
+            }
             ParseError::Truncated => write!(f, "truncated record"),
             ParseError::BadLevel(l) => write!(f, "invalid level byte {l}"),
             ParseError::BadWalls(w) => write!(f, "invalid walls byte {w}"),
@@ -366,6 +409,16 @@ impl PartialEq for ParseError {
             (ParseError::BadMagic, ParseError::BadMagic) => true,
             (ParseError::BadVersion(a), ParseError::BadVersion(b)) => a == b,
             (ParseError::UnknownTag(a), ParseError::UnknownTag(b)) => a == b,
+            (
+                ParseError::TagNotAdmitted {
+                    tag: a,
+                    version: av,
+                },
+                ParseError::TagNotAdmitted {
+                    tag: b,
+                    version: bv,
+                },
+            ) => a == b && av == bv,
             (ParseError::Truncated, ParseError::Truncated) => true,
             (ParseError::BadLevel(a), ParseError::BadLevel(b)) => a == b,
             (ParseError::BadWalls(a), ParseError::BadWalls(b)) => a == b,
@@ -377,6 +430,7 @@ impl PartialEq for ParseError {
 #[derive(Debug)]
 pub struct StreamReader<R: Read> {
     input: R,
+    format_version: u32,
     header: Option<(u32, u32)>,
     body_count: Option<u32>,
     scratch: [u8; 72],
@@ -403,6 +457,7 @@ impl<R: Read> StreamReader<R> {
         }
         Ok(StreamReader {
             input,
+            format_version: version,
             header: Some((world_w, world_h)),
             body_count,
             scratch: [0u8; 72],
@@ -411,6 +466,10 @@ impl<R: Read> StreamReader<R> {
 
     pub fn header(&self) -> (u32, u32) {
         self.header.expect("header consumed in new")
+    }
+
+    pub fn format_version(&self) -> u32 {
+        self.format_version
     }
 
     pub fn body_count(&self) -> Option<u32> {
@@ -431,6 +490,12 @@ impl<R: Read> StreamReader<R> {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(ParseError::Io(e)),
+        }
+        if (6..=13).contains(&tag[0]) && self.format_version < FORMAT_VERSION_GRAVITY {
+            return Err(ParseError::TagNotAdmitted {
+                tag: tag[0],
+                version: self.format_version,
+            });
         }
         let record = match tag[0] {
             1 => {
@@ -1013,6 +1078,168 @@ mod tests {
                 .next_record()
                 .unwrap_err(),
             ParseError::BadWalls(2)
+        );
+    }
+
+    #[test]
+    fn v1_writer_rejects_v2_record_before_serializing() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new(&mut buf, 128, 128).unwrap();
+            assert_eq!(w.format_version(), FORMAT_VERSION);
+            let err = w
+                .write(&Record::BodyState {
+                    tick: 1,
+                    body_id: 0,
+                    region: 0,
+                    level: 1,
+                    x: 1.0,
+                    y: 2.0,
+                    vx: 3.0,
+                    vy: 4.0,
+                    mass: 5.0,
+                })
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            for rec in [
+                Record::TotalsState {
+                    tick: 1,
+                    fine_count: 1,
+                    coarse_count: 0,
+                    mass: 1.0,
+                    px: 0.0,
+                    py: 0.0,
+                    energy: 0.0,
+                },
+                Record::RegionCollapsed {
+                    tick: 1,
+                    region_x: 0,
+                    region_y: 0,
+                    body_count: 0,
+                    mass: 0.0,
+                    com_x: 0.0,
+                    com_y: 0.0,
+                    px: 0.0,
+                    py: 0.0,
+                    energy: 0.0,
+                },
+                Record::RegionMultipole {
+                    tick: 1,
+                    region_x: 0,
+                    region_y: 0,
+                    mx: 0.0,
+                    my: 0.0,
+                    qxx: 0.0,
+                    qxy: 0.0,
+                    qyy: 0.0,
+                },
+                Record::Contact {
+                    tick: 1,
+                    body_a: 0,
+                    body_b: 1,
+                    jn: 1.0,
+                    cx: 0.0,
+                    cy: 0.0,
+                },
+                Record::RegionRadial {
+                    tick: 1,
+                    region_x: 0,
+                    region_y: 0,
+                    binding: 0.0,
+                },
+                Record::ContactParams {
+                    restitution: 0.0,
+                    friction: 0.0,
+                    walls: 0,
+                },
+                Record::RegionShells {
+                    tick: 1,
+                    region_x: 0,
+                    region_y: 0,
+                    binding: 0.0,
+                    b0: 0.0,
+                    b1: 0.0,
+                    b2: 0.0,
+                    b3: 0.0,
+                },
+            ] {
+                assert!(w.write(&rec).is_err(), "v1 writer must reject {:?}", rec);
+            }
+        }
+        assert_eq!(buf.len(), 16, "no payload bytes written on rejection");
+    }
+
+    #[test]
+    fn v1_stream_rejects_tag_six() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new(&mut buf, 128, 128).unwrap();
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
+            w.flush().unwrap();
+        }
+        assert_eq!(buf.len(), 16 + 9);
+        // Handcraft a tag-6 (BodyState) record after the v1 header.
+        buf.push(6u8);
+        buf.extend_from_slice(&[0u8; 54]);
+        let mut r = reader(&buf);
+        assert_eq!(r.format_version(), FORMAT_VERSION);
+        assert_eq!(
+            r.next_record().unwrap(),
+            Some(Record::TickHeader { tick: 0 })
+        );
+        assert_eq!(
+            r.next_record().unwrap_err(),
+            ParseError::TagNotAdmitted { tag: 6, version: 1 }
+        );
+    }
+
+    #[test]
+    fn v1_writer_output_unchanged() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new(&mut buf, 128, 128).unwrap();
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
+            w.write(&Record::Snapshot { population: 5 }).unwrap();
+            w.write(&Record::CellFlipped {
+                tick: 1,
+                x: 3,
+                y: 4,
+            })
+            .unwrap();
+            w.write(&Record::RegionLevel {
+                region_x: 1,
+                region_y: 0,
+                level: 0,
+            })
+            .unwrap();
+            w.write(&Record::RegionState {
+                tick: 7,
+                region_x: 1,
+                region_y: 0,
+                level: 0,
+                population: 3,
+                hash: 0xdeadbeef,
+            })
+            .unwrap();
+            w.flush().unwrap();
+        }
+        assert_eq!(&buf[0..4], MAGIC);
+        assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 1);
+        assert_eq!(buf[16], 1);
+        assert_eq!(buf[25], 2);
+        assert_eq!(buf[34], 3);
+        assert_eq!(buf[51], 4);
+        assert_eq!(buf[61], 5);
+        assert_eq!(buf.len(), 95);
+        let mut r = reader(&buf);
+        assert_eq!(r.format_version(), 1);
+        assert_eq!(
+            r.next_record().unwrap(),
+            Some(Record::TickHeader { tick: 0 })
+        );
+        assert_eq!(
+            r.next_record().unwrap(),
+            Some(Record::Snapshot { population: 5 })
         );
     }
 
