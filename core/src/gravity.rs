@@ -1209,8 +1209,7 @@ impl GravityWorld {
             && (left_fine.iter().any(|&c| c) || left_collapse.iter().any(|&c| c))
         {
             self.touching.retain(|&(a, b)| {
-                if b >= MONOPOLE_BASE
-                    && b < WALL_BASE
+                if (MONOPOLE_BASE..WALL_BASE).contains(&b)
                     && (b - MONOPOLE_BASE) < 4
                     && left_collapse[(b - MONOPOLE_BASE) as usize]
                 {
