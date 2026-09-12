@@ -200,6 +200,7 @@ pub struct GravityWorld {
     pub last_expansion_shells: Vec<Vec<u32>>,
     pub contacts: bool,
     pub contact_params: bool,
+    pub contact_armed: bool,
     pub restitution: f64,
     pub friction: f64,
     pub walls: bool,
@@ -356,6 +357,7 @@ impl GravityWorld {
             last_expansion_shells: Vec::new(),
             contacts: false,
             contact_params: false,
+            contact_armed: false,
             restitution: 0.0,
             friction: 0.0,
             walls: false,
@@ -1316,6 +1318,15 @@ impl GravityWorld {
         let e = self.restitution;
         let fr = self.friction;
         let extended = self.contact_params;
+        // Section 21 activation rule: the touching set's
+        // record-suppression semantics are live only from the first
+        // pass AFTER a Contact record has been emitted. Until then any
+        // impulse-producing overlap records — the run's first
+        // trajectory-changing impulse is never silent, so a
+        // record-only verifier replaying gravity-only up to the first
+        // record's tick reproduces the run exactly (a verifier's own
+        // touching history also begins at the first record).
+        let suppress = self.contact_armed;
         let mut next = BTreeSet::new();
         let mut events = Vec::new();
         for i in 0..n {
@@ -1389,7 +1400,7 @@ impl GravityWorld {
                     let (_, jn) = self.static_impulse(i, nx, ny, vrx, vry);
                     (jn, (mi * mj) / (mi + mj))
                 };
-                if self.touching.contains(&pair) {
+                if suppress && self.touching.contains(&pair) {
                     continue;
                 }
                 let (jvx, jvy) = if kind[j] == 0 {
@@ -1451,7 +1462,7 @@ impl GravityWorld {
                     let cy = (self.bodies[i].y + tot.com_y) * 0.5;
                     let (_, jn) = self.static_impulse(i, nx, ny, vrx, vry);
                     let mu = (mi * tot.mass) / (mi + tot.mass);
-                    if self.touching.contains(&pair) {
+                    if suppress && self.touching.contains(&pair) {
                         continue;
                     }
                     let vn_after = (tot.vcom_x - self.bodies[i].vx) * nx
@@ -1531,7 +1542,7 @@ impl GravityWorld {
                     }
                     let (vn, jn) = self.static_impulse(i, nx, ny, vrx, vry);
                     let mi = self.bodies[i].mass;
-                    if self.touching.contains(&pair) {
+                    if suppress && self.touching.contains(&pair) {
                         continue;
                     }
                     let vn_after = (0.0 - self.bodies[i].vx) * nx + (0.0 - self.bodies[i].vy) * ny;
@@ -1548,6 +1559,9 @@ impl GravityWorld {
                     });
                 }
             }
+        }
+        if !events.is_empty() {
+            self.contact_armed = true;
         }
         self.touching = next;
         self.last_contacts.extend(events);
@@ -3139,6 +3153,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn first_impulse_records_after_silent_overlap() {
+        // OTO-014, seed 416 reproducer (`--mode gravity --contacts
+        // --seed 416 --bodies 2`): the pair first overlaps while
+        // receding, joining the touching set without a record, and the
+        // first trajectory-changing impulse at tick 13 must still emit
+        // the stream's first Contact record — suppression activates
+        // only from the first recorded contact onward. Before the fix
+        // the tick-13 impulse applied silently and the run diverged
+        // from gravity-only with zero records.
+        let mut w = GravityWorld::new(416, 2);
+        w.contacts = true;
+        while w.tick < 12 {
+            w.step();
+            assert!(
+                w.last_contacts.is_empty(),
+                "no impulse before tick 13 (tick {})",
+                w.tick
+            );
+            w.last_contacts.clear();
+        }
+        w.step();
+        assert_eq!(w.tick, 13);
+        assert_eq!(
+            w.last_contacts.len(),
+            1,
+            "tick 13 impulse produces the first Contact record"
+        );
+        let c = &w.last_contacts[0];
+        assert_eq!((c.a, c.b, c.tick), (0, 1, 13));
+        assert!(c.jn > 0.0);
+        assert!(w.touching.contains(&(0, 1)));
+        assert!(w.contact_armed, "suppression live from the next pass");
+        w.last_contacts.clear();
+        // The pair is now in the touching set: a same-pass-ordered
+        // re-approach at the next tick stays silent, matching the
+        // post-activation semantics a verifier replays.
+        w.step();
+        assert_eq!(w.touching.len(), 1, "pair remains overlapping");
     }
 
     #[test]

@@ -554,7 +554,18 @@ they must reject unknown tag 10 if they predate it).
 - Touching set: at the end of each pass, the set of overlapping
   fine pairs (whether or not an impulse fired) replaces the previous
   set. A Contact record is emitted iff an impulse fired AND the pair
-  was NOT in the previous tick's set (a contact beginning). Resting
+  was NOT in the previous tick's set (a contact beginning). The
+  suppression history begins at the stream's first Contact record:
+  before any contact has been recorded, the previous set is treated
+  as empty, so the run's first impulse-producing overlap always emits
+  the first Contact record — the first trajectory-changing impulse
+  of a run is never silent, and a record-only verifier replaying
+  gravity-only up to the first record's tick reproduces the run
+  exactly (a verifier, which runs no contact pass before that tick,
+  has an empty touching history of its own — the rule makes emitter
+  and verifier coincide). From the first Contact record onward the
+  suppression check is live with the set as maintained above.
+  Resting
   contact (pair stays overlapping) re-fires gravity-built approach
   velocity every tick; those impulses apply silently and emit nothing.
   Pairs leave the set by separating, or by either member leaving the
