@@ -468,6 +468,19 @@ impl GravityWorld {
 
     fn demote_region(&mut self, region: u8, t0: u64) {
         let (x0, y0, x1, y1) = Self::box_of(region);
+        // Section 26 materialization applies to re-demotion too: every
+        // existing window fit of the region is materialized and
+        // discarded before membership is re-evaluated, exactly like
+        // collapse-on-coarse. An out-of-box member would otherwise
+        // keep its old fit while the region deadline advances past
+        // that fit's own [t0, t0 + WINDOW] validity end.
+        for i in 0..self.bodies.len() {
+            if self.coarse[i].is_some() && self.body_region[i] == region {
+                self.bodies[i] = self.body_state_at(i, t0);
+                self.coarse[i] = None;
+                self.body_region[i] = UNMANAGED;
+            }
+        }
         let members: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| {
                 self.collapsed[i].is_none() && {
@@ -3077,6 +3090,55 @@ mod tests {
             "empty re-fit at deadline"
         );
         assert_eq!(w.region_window_deadline[0], None);
+    }
+
+    #[test]
+    fn re_demote_discards_stale_fits_at_boundary() {
+        // OTO-013: re-demoting an already-Coarse region must
+        // materialize and discard every old fit of the region before
+        // building the new window. An out-of-box member would
+        // otherwise keep a fit whose validity ends at its own
+        // t0 + WINDOW while the region deadline advances to the new
+        // t0 + WINDOW, and the polynomial would be evaluated past its
+        // window end.
+        let mut w = GravityWorld::new(11, 8);
+        w.bodies[0].x = 127.995;
+        w.bodies[0].y = 96.0;
+        w.bodies[0].vx = 0.5;
+        w.bodies[0].vy = 0.0;
+        for b in &mut w.bodies[1..] {
+            b.x = 100.0;
+            b.y = 100.0;
+        }
+        w.schedule(1, 3, Action::Demote);
+        w.schedule(30, 3, Action::Demote);
+        while w.tick < 29 {
+            w.step();
+        }
+        assert!(w.coarse[0].is_some(), "body 0 carried a fit into tick 30");
+        w.step();
+        assert!(
+            w.coarse[0].is_none(),
+            "out-of-box member thawed at the re-demotion boundary"
+        );
+        assert_eq!(
+            w.region_window_deadline[3],
+            Some(30 + WINDOW),
+            "one coherent new window"
+        );
+        while w.tick < 70 {
+            w.step();
+            for i in 0..w.bodies.len() {
+                if let Some(fit) = &w.coarse[i] {
+                    assert!(
+                        w.tick <= fit.t0 + WINDOW,
+                        "body {i} fit t0 {} evaluated at {} past its window end",
+                        fit.t0,
+                        w.tick
+                    );
+                }
+            }
+        }
     }
 
     #[test]
