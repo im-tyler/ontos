@@ -179,6 +179,7 @@ pub struct GravityWorld {
     pub collapsed: Vec<Option<CollapsedBody>>,
     pub body_region: Vec<u8>,
     pub region_mode: [RegionMode; 4],
+    pub region_window_deadline: [Option<u64>; 4],
     pub region_totals: [Option<CollapseTotals>; 4],
     pub region_multipole: [bool; 4],
     pub region_radial: [bool; 4],
@@ -334,6 +335,7 @@ impl GravityWorld {
             collapsed: vec![None; count as usize],
             body_region: vec![UNMANAGED; count as usize],
             region_mode: [RegionMode::Fine; 4],
+            region_window_deadline: [None; 4],
             region_totals: [None; 4],
             region_multipole: [false; 4],
             region_radial: [false; 4],
@@ -489,6 +491,7 @@ impl GravityWorld {
             });
             self.body_region[i] = region;
         }
+        self.region_window_deadline[region as usize] = Some(t0 + WINDOW);
         self.region_mode[region as usize] = RegionMode::Coarse;
     }
 
@@ -501,6 +504,7 @@ impl GravityWorld {
                 self.body_region[i] = UNMANAGED;
             }
         }
+        self.region_window_deadline[region as usize] = None;
         self.region_mode[region as usize] = RegionMode::Fine;
     }
 
@@ -549,6 +553,7 @@ impl GravityWorld {
             self.region_radial[region as usize] = self.radial;
             self.region_shells[region as usize] = self.shells;
             self.collapse_records.push(totals);
+            self.region_window_deadline[region as usize] = None;
             self.region_mode[region as usize] = RegionMode::Collapsed;
             return;
         }
@@ -670,6 +675,7 @@ impl GravityWorld {
         self.region_radial[region as usize] = self.radial;
         self.region_shells[region as usize] = self.shells;
         self.collapse_records.push(totals);
+        self.region_window_deadline[region as usize] = None;
         self.region_mode[region as usize] = RegionMode::Collapsed;
     }
 
@@ -720,6 +726,7 @@ impl GravityWorld {
                 self.body_region[i] = UNMANAGED;
             }
         }
+        self.region_window_deadline[region as usize] = None;
         self.region_mode[region as usize] = RegionMode::Fine;
     }
 
@@ -1073,6 +1080,7 @@ impl GravityWorld {
     }
 
     fn refit_region(&mut self, region: u8, t: u64) {
+        self.region_window_deadline[region as usize] = None;
         let (x0, y0, x1, y1) = Self::box_of(region);
         let members: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| self.coarse[i].is_some() && self.body_region[i] == region)
@@ -1110,6 +1118,7 @@ impl GravityWorld {
             });
             self.body_region[i] = region;
         }
+        self.region_window_deadline[region as usize] = Some(t + WINDOW);
     }
 
     pub fn step(&mut self) {
@@ -1148,16 +1157,10 @@ impl GravityWorld {
                 .extend(fired);
         }
         for region in 0..4u8 {
-            if self.region_mode[region as usize] == RegionMode::Coarse {
-                let ended = (0..self.bodies.len()).any(|i| {
-                    self.body_region[i] == region
-                        && self.coarse[i]
-                            .as_ref()
-                            .is_some_and(|f| entering == f.t0 + WINDOW)
-                });
-                if ended {
-                    self.refit_region(region, entering);
-                }
+            if self.region_mode[region as usize] == RegionMode::Coarse
+                && self.region_window_deadline[region as usize] == Some(entering)
+            {
+                self.refit_region(region, entering);
             }
         }
 
@@ -2781,6 +2784,39 @@ mod tests {
         assert_eq!((region, level), (1, 2), "absorbed into region 1 collapse");
         assert!(w.coarse[0].is_none(), "old window discarded");
         assert!(b.x >= 60.0, "emitted near the collapsing box");
+    }
+
+    #[test]
+    fn donor_region_refits_after_foreign_absorption() {
+        // Foreign-window absorption removes body Fits but must not stall
+        // the donor region's window: the region-level deadline still
+        // fires and the now-memberless donor returns to Fine (the old
+        // member-scan detection never fired once the last Fit was gone).
+        let mut w = GravityWorld::new(11, 8);
+        w.bodies[0].x = 63.995;
+        w.bodies[0].y = 32.0;
+        w.bodies[0].vx = 0.5;
+        w.bodies[0].vy = 0.0;
+        for b in &mut w.bodies[1..] {
+            b.x = 100.0;
+            b.y = 100.0;
+        }
+        w.schedule(1, 0, Action::Demote);
+        w.schedule(30, 1, Action::Collapse);
+        while w.tick < 32 {
+            w.step();
+        }
+        assert_eq!(w.region_mode[1], RegionMode::Collapsed);
+        assert!(w.collapsed[0].is_some(), "body 0 absorbed by region 1");
+        assert!(w.coarse[0].is_none(), "absorption dropped the body Fit");
+        assert_eq!(w.region_mode[0], RegionMode::Coarse);
+        w.step();
+        assert_eq!(w.tick, 1 + WINDOW, "donor deadline was t0 + WINDOW");
+        assert_eq!(
+            w.region_mode[0],
+            RegionMode::Fine,
+            "donor refits at its deadline even with no surviving member Fit"
+        );
     }
 
     #[test]
