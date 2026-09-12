@@ -1458,44 +1458,53 @@ impl GravityWorld {
                     continue;
                 }
                 for wall in 0..4u32 {
-                    let (nx, ny, cx, cy) = match wall {
-                        0 => {
-                            if !(self.bodies[i].x - radii[i] < 0.0 && self.bodies[i].vx < 0.0) {
-                                continue;
-                            }
-                            (
-                                0.0 - 1.0,
-                                0.0,
-                                (self.bodies[i].x + 0.0) * 0.5,
-                                self.bodies[i].y,
-                            )
-                        }
-                        1 => {
-                            if !(self.bodies[i].x + radii[i] > 128.0 && self.bodies[i].vx > 0.0) {
-                                continue;
-                            }
-                            (1.0, 0.0, (self.bodies[i].x + 128.0) * 0.5, self.bodies[i].y)
-                        }
-                        2 => {
-                            if !(self.bodies[i].y - radii[i] < 0.0 && self.bodies[i].vy < 0.0) {
-                                continue;
-                            }
-                            (
-                                0.0,
-                                0.0 - 1.0,
-                                self.bodies[i].x,
-                                (self.bodies[i].y + 0.0) * 0.5,
-                            )
-                        }
-                        _ => {
-                            if !(self.bodies[i].y + radii[i] > 128.0 && self.bodies[i].vy > 0.0) {
-                                continue;
-                            }
-                            (0.0, 1.0, self.bodies[i].x, (self.bodies[i].y + 128.0) * 0.5)
-                        }
+                    // Section 24: overlap and approach are separate
+                    // tests. Touching contains every overlapping pair,
+                    // walls included, so a penetrating-but-receding
+                    // body keeps its key (the contact has not ended);
+                    // the impulse applies only while approaching.
+                    let (overlap, approaching, nx, ny, cx, cy) = match wall {
+                        0 => (
+                            self.bodies[i].x - radii[i] < 0.0,
+                            self.bodies[i].vx < 0.0,
+                            0.0 - 1.0,
+                            0.0,
+                            (self.bodies[i].x + 0.0) * 0.5,
+                            self.bodies[i].y,
+                        ),
+                        1 => (
+                            self.bodies[i].x + radii[i] > 128.0,
+                            self.bodies[i].vx > 0.0,
+                            1.0,
+                            0.0,
+                            (self.bodies[i].x + 128.0) * 0.5,
+                            self.bodies[i].y,
+                        ),
+                        2 => (
+                            self.bodies[i].y - radii[i] < 0.0,
+                            self.bodies[i].vy < 0.0,
+                            0.0,
+                            0.0 - 1.0,
+                            self.bodies[i].x,
+                            (self.bodies[i].y + 0.0) * 0.5,
+                        ),
+                        _ => (
+                            self.bodies[i].y + radii[i] > 128.0,
+                            self.bodies[i].vy > 0.0,
+                            0.0,
+                            1.0,
+                            self.bodies[i].x,
+                            (self.bodies[i].y + 128.0) * 0.5,
+                        ),
                     };
+                    if !overlap {
+                        continue;
+                    }
                     let pair = (i as u32, WALL_BASE + wall);
                     next.insert(pair);
+                    if !approaching {
+                        continue;
+                    }
                     let vrx = 0.0 - self.bodies[i].vx;
                     let vry = 0.0 - self.bodies[i].vy;
                     let vn = vrx * nx + vry * ny;
@@ -2502,6 +2511,56 @@ mod tests {
             w.py - py0
         );
         assert!(c.vn_after > 0.0, "separating after bounce");
+    }
+
+    #[test]
+    fn wall_touching_holds_receding_penetration_without_record() {
+        // OTO-009, three phases: (1) penetrating + inbound emits exactly
+        // one Contact; (2) penetrating + outbound keeps the wall key in
+        // the touching set, no record; (3) inbound again before
+        // separating applies the impulse with NO second record — the
+        // pair never left the touching set, so re-approach is not a
+        // contact beginning.
+        let mut w = GravityWorld::new(3, 1);
+        w.contacts = true;
+        w.contact_params = true;
+        w.walls = true;
+        w.restitution = 0.5;
+        w.friction = 0.0;
+        w.bodies[0].x = -1.0;
+        w.bodies[0].y = 50.0;
+        w.bodies[0].vx = -0.5;
+        w.bodies[0].vy = 0.0;
+        w.step();
+        assert_eq!(w.last_contacts.len(), 1, "phase 1: one contact record");
+        assert_eq!(w.last_contacts[0].b, WALL_BASE);
+        assert!(w.last_contacts[0].jn > 0.0);
+        assert!(w.bodies[0].vx > 0.0, "bounced outbound");
+        assert!(w.touching.contains(&(0, WALL_BASE)));
+        w.last_contacts.clear();
+        w.step();
+        assert_eq!(
+            w.last_contacts.len(),
+            0,
+            "phase 2: receding penetration emits nothing"
+        );
+        assert!(
+            w.touching.contains(&(0, WALL_BASE)),
+            "wall key stays in touching while overlapping"
+        );
+        w.last_contacts.clear();
+        w.bodies[0].vx = -0.5;
+        w.step();
+        assert_eq!(
+            w.last_contacts.len(),
+            0,
+            "phase 3: same contact, no second record"
+        );
+        assert!(
+            w.bodies[0].vx > 0.0,
+            "the impulse still applies on re-approach"
+        );
+        assert!(w.touching.contains(&(0, WALL_BASE)));
     }
 
     #[test]
