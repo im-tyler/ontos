@@ -194,6 +194,29 @@ impl<W: Write> StreamWriter<W> {
                 ));
             }
         }
+        // Section 24 parameter ranges, validated before serializing so
+        // a rejected record appends no bytes (the reader enforces the
+        // same bounds plus the once-and-early placement rules).
+        if let Record::ContactParams {
+            restitution,
+            friction,
+            walls,
+        } = record
+        {
+            if *walls > 1
+                || !restitution.is_finite()
+                || !(0.0..=1.0).contains(restitution)
+                || !friction.is_finite()
+                || *friction < 0.0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "invalid contact params: restitution {restitution} must be finite in [0,1], friction {friction} must be finite >= 0, walls {walls} must be 0 or 1"
+                    ),
+                ));
+            }
+        }
         match record {
             Record::Header { .. } => Ok(()),
             Record::TickHeader { tick } => {
@@ -395,6 +418,9 @@ pub enum ParseError {
     Truncated,
     BadLevel(u8),
     BadWalls(u8),
+    DuplicateContactParams,
+    LateContactParams,
+    BadContactParams,
     Io(io::Error),
 }
 
@@ -419,6 +445,18 @@ impl std::fmt::Display for ParseError {
             ParseError::Truncated => write!(f, "truncated record"),
             ParseError::BadLevel(l) => write!(f, "invalid level byte {l}"),
             ParseError::BadWalls(w) => write!(f, "invalid walls byte {w}"),
+            ParseError::DuplicateContactParams => {
+                write!(f, "duplicate ContactParams record")
+            }
+            ParseError::LateContactParams => {
+                write!(f, "ContactParams after the first TickHeader")
+            }
+            ParseError::BadContactParams => {
+                write!(
+                    f,
+                    "contact params out of range: restitution finite in [0,1], friction finite >= 0"
+                )
+            }
             ParseError::Io(e) => write!(f, "io error: {e}"),
         }
     }
@@ -445,6 +483,9 @@ impl PartialEq for ParseError {
             (ParseError::Truncated, ParseError::Truncated) => true,
             (ParseError::BadLevel(a), ParseError::BadLevel(b)) => a == b,
             (ParseError::BadWalls(a), ParseError::BadWalls(b)) => a == b,
+            (ParseError::DuplicateContactParams, ParseError::DuplicateContactParams) => true,
+            (ParseError::LateContactParams, ParseError::LateContactParams) => true,
+            (ParseError::BadContactParams, ParseError::BadContactParams) => true,
             _ => false,
         }
     }
@@ -456,6 +497,8 @@ pub struct StreamReader<R: Read> {
     format_version: u32,
     header: Option<(u32, u32)>,
     body_count: Option<u32>,
+    seen_tick_header: bool,
+    seen_contact_params: bool,
     scratch: [u8; 72],
 }
 
@@ -483,6 +526,8 @@ impl<R: Read> StreamReader<R> {
             format_version: version,
             header: Some((world_w, world_h)),
             body_count,
+            seen_tick_header: false,
+            seen_contact_params: false,
             scratch: [0u8; 72],
         })
     }
@@ -523,6 +568,7 @@ impl<R: Read> StreamReader<R> {
         let record = match tag[0] {
             1 => {
                 self.take(8)?;
+                self.seen_tick_header = true;
                 Record::TickHeader {
                     tick: u64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
                 }
@@ -652,9 +698,27 @@ impl<R: Read> StreamReader<R> {
                 if walls > 1 {
                     return Err(ParseError::BadWalls(walls));
                 }
+                // Section 24 placement: at most once, before the first
+                // TickHeader, with in-range parameters.
+                if self.seen_contact_params {
+                    return Err(ParseError::DuplicateContactParams);
+                }
+                if self.seen_tick_header {
+                    return Err(ParseError::LateContactParams);
+                }
+                let restitution = f64::from_le_bytes(self.scratch[0..8].try_into().unwrap());
+                let friction = f64::from_le_bytes(self.scratch[8..16].try_into().unwrap());
+                if !restitution.is_finite()
+                    || !(0.0..=1.0).contains(&restitution)
+                    || !friction.is_finite()
+                    || friction < 0.0
+                {
+                    return Err(ParseError::BadContactParams);
+                }
+                self.seen_contact_params = true;
                 Record::ContactParams {
-                    restitution: f64::from_le_bytes(self.scratch[0..8].try_into().unwrap()),
-                    friction: f64::from_le_bytes(self.scratch[8..16].try_into().unwrap()),
+                    restitution,
+                    friction,
                     walls,
                 }
             }
@@ -1088,23 +1152,144 @@ mod tests {
 
     #[test]
     fn contact_params_rejects_bad_walls() {
+        let mut stream = Vec::new();
+        {
+            let mut w = StreamWriter::new_gravity(&mut stream, 128, 128, 8).unwrap();
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
+        }
+        let mut crafted = stream[..20].to_vec();
+        push_contact_params(&mut crafted, 0.0, 0.0, 2);
+        let mut r = StreamReader::new(&crafted[..]).unwrap();
+        assert_eq!(r.next_record().unwrap_err(), ParseError::BadWalls(2));
+    }
+
+    // Handcraft a tag-12 record with arbitrary parameter bytes after a
+    // gravity header (the writer now rejects out-of-range values).
+    fn push_contact_params(buf: &mut Vec<u8>, restitution: f64, friction: f64, walls: u8) {
+        buf.push(12u8);
+        buf.extend_from_slice(&restitution.to_le_bytes());
+        buf.extend_from_slice(&friction.to_le_bytes());
+        buf.push(walls);
+    }
+
+    #[test]
+    fn contact_params_rejects_duplicate() {
         let mut buf = Vec::new();
         {
             let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 8).unwrap();
             w.write(&Record::ContactParams {
-                restitution: 0.0,
-                friction: 0.0,
-                walls: 2,
+                restitution: 0.5,
+                friction: 0.25,
+                walls: 0,
             })
             .unwrap();
         }
+        push_contact_params(&mut buf, 0.5, 0.25, 0);
+        let mut r = StreamReader::new(&buf[..]).unwrap();
+        assert!(r.next_record().unwrap().is_some());
         assert_eq!(
-            StreamReader::new(&buf[..])
-                .unwrap()
-                .next_record()
-                .unwrap_err(),
-            ParseError::BadWalls(2)
+            r.next_record().unwrap_err(),
+            ParseError::DuplicateContactParams
         );
+    }
+
+    #[test]
+    fn contact_params_rejects_late_after_first_tick_header() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 8).unwrap();
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
+        }
+        push_contact_params(&mut buf, 0.5, 0.25, 0);
+        let mut r = StreamReader::new(&buf[..]).unwrap();
+        assert_eq!(
+            r.next_record().unwrap(),
+            Some(Record::TickHeader { tick: 0 })
+        );
+        assert_eq!(r.next_record().unwrap_err(), ParseError::LateContactParams);
+    }
+
+    #[test]
+    fn contact_params_rejects_out_of_range_values() {
+        for (restitution, friction) in [
+            (1.5f64, 0.25f64),
+            (-0.1, 0.25),
+            (f64::NAN, 0.25),
+            (f64::INFINITY, 0.25),
+            (0.5, -0.5),
+            (0.5, f64::NAN),
+            (0.5, f64::INFINITY),
+        ] {
+            let mut stream = Vec::new();
+            {
+                let mut w = StreamWriter::new_gravity(&mut stream, 128, 128, 8).unwrap();
+                w.write(&Record::TickHeader { tick: 0 }).unwrap();
+            }
+            let mut crafted = stream[..20].to_vec();
+            push_contact_params(&mut crafted, restitution, friction, 0);
+            crafted.extend_from_slice(&stream[20..]);
+            let mut r = StreamReader::new(&crafted[..]).unwrap();
+            assert_eq!(
+                r.next_record().unwrap_err(),
+                ParseError::BadContactParams,
+                "reader must reject restitution {restitution} friction {friction}"
+            );
+        }
+    }
+
+    #[test]
+    fn writer_rejects_bad_contact_params_before_serializing() {
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::new_gravity(&mut buf, 128, 128, 8).unwrap();
+            for rec in [
+                Record::ContactParams {
+                    restitution: 1.5,
+                    friction: 0.25,
+                    walls: 0,
+                },
+                Record::ContactParams {
+                    restitution: -0.1,
+                    friction: 0.25,
+                    walls: 0,
+                },
+                Record::ContactParams {
+                    restitution: f64::NAN,
+                    friction: 0.25,
+                    walls: 0,
+                },
+                Record::ContactParams {
+                    restitution: f64::INFINITY,
+                    friction: 0.25,
+                    walls: 0,
+                },
+                Record::ContactParams {
+                    restitution: 0.5,
+                    friction: -0.5,
+                    walls: 0,
+                },
+                Record::ContactParams {
+                    restitution: 0.5,
+                    friction: f64::NAN,
+                    walls: 0,
+                },
+                Record::ContactParams {
+                    restitution: 0.5,
+                    friction: f64::INFINITY,
+                    walls: 0,
+                },
+                Record::ContactParams {
+                    restitution: 0.5,
+                    friction: 0.25,
+                    walls: 2,
+                },
+            ] {
+                let err = w.write(&rec).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{rec:?}");
+            }
+            w.write(&Record::TickHeader { tick: 0 }).unwrap();
+        }
+        assert_eq!(buf.len(), 20 + 9, "no payload bytes on params rejection");
     }
 
     #[test]
