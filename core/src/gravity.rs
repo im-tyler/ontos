@@ -1123,6 +1123,9 @@ impl GravityWorld {
 
     pub fn step(&mut self) {
         let entering = self.tick + 1;
+        let pre_fine: Vec<bool> = (0..self.bodies.len())
+            .map(|i| self.coarse[i].is_none() && self.collapsed[i].is_none())
+            .collect();
         if let Some(events) = self.events.remove(&entering) {
             for &(region, action) in &events {
                 self.apply_event(region, action);
@@ -1161,6 +1164,31 @@ impl GravityWorld {
                 && self.region_window_deadline[region as usize] == Some(entering)
             {
                 self.refit_region(region, entering);
+            }
+        }
+
+        // Section 21: a pair leaves the touching set when either member
+        // crosses the Fine/non-Fine boundary (demote, promote, collapse,
+        // expansion, window thaw), so a body that returns to Fine while
+        // still overlapping begins a fresh contact. Derived from actual
+        // pre/post membership: a coarse body moving between coarse
+        // regions (e.g. absorbed into a foreign collapse) stays non-Fine
+        // and keeps its keys. Pseudo-id keys (monopoles, walls) name no
+        // real body and drop naturally when detection stops.
+        if !self.touching.is_empty() {
+            let changed: Vec<bool> = (0..self.bodies.len())
+                .map(|i| {
+                    let fine = self.coarse[i].is_none() && self.collapsed[i].is_none();
+                    fine != pre_fine[i]
+                })
+                .collect();
+            if changed.iter().any(|&c| c) {
+                self.touching.retain(|&(a, b)| {
+                    let a_changed = (a as usize) < changed.len() && changed[a as usize];
+                    let b_changed =
+                        b < MONOPOLE_BASE && (b as usize) < changed.len() && changed[b as usize];
+                    !a_changed && !b_changed
+                });
             }
         }
 
@@ -2684,6 +2712,52 @@ mod tests {
             b.step();
         }
         assert_ne!(a.world_hash(), b.world_hash());
+    }
+
+    #[test]
+    fn contact_fresh_record_across_membership_boundary() {
+        // Section 21: demote/collapse drops a pair from the touching set
+        // and a body that returns to Fine while still overlapping begins
+        // a fresh contact. Without boundary invalidation the key survives
+        // the coarse era (extended sweeps re-detect fine x coarse pairs
+        // every tick) and neither boundary emits a record.
+        let mut w = GravityWorld::new(11, 2);
+        w.bodies[0].mass = 2.0;
+        w.bodies[0].x = 62.0;
+        w.bodies[0].y = 32.0;
+        w.bodies[0].vx = 0.0;
+        w.bodies[0].vy = 0.0;
+        w.bodies[1].mass = 2.0;
+        w.bodies[1].x = 66.0;
+        w.bodies[1].y = 32.0;
+        w.bodies[1].vx = 0.0;
+        w.bodies[1].vy = 0.0;
+        w.contacts = true;
+        w.contact_params = true;
+        w.schedule(2, 1, Action::Demote);
+        w.schedule(3, 1, Action::Promote);
+        w.step();
+        assert_eq!(w.last_contacts.len(), 1, "contact begins at tick 1");
+        assert_eq!((w.last_contacts[0].a, w.last_contacts[0].b), (0, 1));
+        assert!(w.last_contacts[0].jn > 0.0);
+        w.last_contacts.clear();
+        w.step();
+        assert_eq!(
+            w.last_contacts.len(),
+            1,
+            "demote boundary emits a fresh static record"
+        );
+        assert_eq!((w.last_contacts[0].a, w.last_contacts[0].b), (0, 1));
+        assert!(w.last_contacts[0].jn > 0.0);
+        w.last_contacts.clear();
+        w.step();
+        assert_eq!(
+            w.last_contacts.len(),
+            1,
+            "promote boundary emits a fresh record while still overlapping"
+        );
+        assert_eq!((w.last_contacts[0].a, w.last_contacts[0].b), (0, 1));
+        assert!(w.last_contacts[0].jn > 0.0);
     }
 
     #[test]
