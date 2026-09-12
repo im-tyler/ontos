@@ -48,6 +48,17 @@ fn level_byte(action: Action) -> u8 {
     }
 }
 
+// Scheduled events fire on entering ticks, which start at 1 — a
+// T == 0 event parses but can never fire. Reject it up front, before
+// any stream is created.
+fn parse_event_tick(raw: &str) -> u64 {
+    let t: u64 = raw.parse().expect("invalid tick");
+    if t == 0 {
+        panic!("invalid tick 0: event ticks start at 1");
+    }
+    t
+}
+
 fn main() {
     let mut ticks: u64 = 100;
     let mut seed: u64 = 42;
@@ -145,28 +156,28 @@ fn main() {
                 i += 3;
             }
             "--demote-at" => {
-                let t: u64 = args[i + 1].parse().expect("invalid tick");
+                let t = parse_event_tick(&args[i + 1]);
                 let rx: u32 = parse_region(&args[i + 2]);
                 let ry: u32 = parse_region(&args[i + 3]);
                 events.push((t, (ry * 2 + rx) as u8, Action::Demote));
                 i += 4;
             }
             "--promote-at" => {
-                let t: u64 = args[i + 1].parse().expect("invalid tick");
+                let t = parse_event_tick(&args[i + 1]);
                 let rx: u32 = parse_region(&args[i + 2]);
                 let ry: u32 = parse_region(&args[i + 3]);
                 events.push((t, (ry * 2 + rx) as u8, Action::Promote));
                 i += 4;
             }
             "--collapse-at" => {
-                let t: u64 = args[i + 1].parse().expect("invalid tick");
+                let t = parse_event_tick(&args[i + 1]);
                 let rx: u32 = parse_region(&args[i + 2]);
                 let ry: u32 = parse_region(&args[i + 3]);
                 events.push((t, (ry * 2 + rx) as u8, Action::Collapse));
                 i += 4;
             }
             "--expand-at" => {
-                let t: u64 = args[i + 1].parse().expect("invalid tick");
+                let t = parse_event_tick(&args[i + 1]);
                 let rx: u32 = parse_region(&args[i + 2]);
                 let ry: u32 = parse_region(&args[i + 3]);
                 events.push((t, (ry * 2 + rx) as u8, Action::Promote));
@@ -550,7 +561,7 @@ mod tests {
 
     use ontos_stream::{Record, StreamReader};
 
-    use super::{parse_friction, parse_restitution, run_gravity};
+    use super::{parse_event_tick, parse_friction, parse_restitution, run_gravity};
 
     fn written_records(name: &str, restitution: Option<f64>, friction: Option<f64>) -> Vec<Record> {
         let path = std::env::temp_dir().join(name);
@@ -615,6 +626,24 @@ mod tests {
                 "bare --contacts stays a section 21 stream"
             );
         });
+    }
+
+    #[test]
+    fn event_tick_accepts_one_and_above() {
+        assert_eq!(parse_event_tick("1"), 1);
+        assert_eq!(parse_event_tick("64"), 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid tick 0")]
+    fn event_tick_rejects_zero() {
+        parse_event_tick("0");
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid tick")]
+    fn event_tick_rejects_garbage() {
+        parse_event_tick("soon");
     }
 
     #[test]
