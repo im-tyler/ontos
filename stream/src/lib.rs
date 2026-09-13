@@ -3,6 +3,11 @@ use std::io::{self, Read, Write};
 pub const MAGIC: &[u8; 4] = b"ONTO";
 pub const FORMAT_VERSION: u32 = 1;
 pub const FORMAT_VERSION_GRAVITY: u32 = 2;
+// Section 9 fixes the world at 128 x 128 in the version 1 header
+// (inherited by version 2); writers reject any other dimensions and
+// readers treat them as an invalid header.
+pub const WORLD_W: u32 = 128;
+pub const WORLD_H: u32 = 128;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Record {
@@ -116,6 +121,9 @@ pub struct StreamWriter<W: Write> {
 
 impl<W: Write> StreamWriter<W> {
     pub fn new(mut out: W, world_w: u32, world_h: u32) -> io::Result<Self> {
+        if world_w != WORLD_W || world_h != WORLD_H {
+            return Err(world_size_error(world_w, world_h));
+        }
         out.write_all(MAGIC)?;
         out.write_all(&FORMAT_VERSION.to_le_bytes())?;
         out.write_all(&world_w.to_le_bytes())?;
@@ -134,6 +142,9 @@ impl<W: Write> StreamWriter<W> {
         world_h: u32,
         body_count: u32,
     ) -> io::Result<Self> {
+        if world_w != WORLD_W || world_h != WORLD_H {
+            return Err(world_size_error(world_w, world_h));
+        }
         out.write_all(MAGIC)?;
         out.write_all(&FORMAT_VERSION_GRAVITY.to_le_bytes())?;
         out.write_all(&world_w.to_le_bytes())?;
@@ -440,6 +451,13 @@ impl<W: Write> StreamWriter<W> {
     }
 }
 
+fn world_size_error(world_w: u32, world_h: u32) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("invalid world dimensions {world_w}x{world_h}, the spec fixes {WORLD_W}x{WORLD_H}"),
+    )
+}
+
 #[derive(Debug)]
 pub enum ParseError {
     BadMagic,
@@ -449,6 +467,7 @@ pub enum ParseError {
     Truncated,
     BadLevel(u8),
     BadWalls(u8),
+    BadWorldSize(u32, u32),
     DuplicateContactParams,
     LateContactParams,
     BadContactParams,
@@ -476,6 +495,10 @@ impl std::fmt::Display for ParseError {
             ParseError::Truncated => write!(f, "truncated record"),
             ParseError::BadLevel(l) => write!(f, "invalid level byte {l}"),
             ParseError::BadWalls(w) => write!(f, "invalid walls byte {w}"),
+            ParseError::BadWorldSize(w, h) => write!(
+                f,
+                "invalid world dimensions {w}x{h}, the spec fixes 128x128"
+            ),
             ParseError::DuplicateContactParams => {
                 write!(f, "duplicate ContactParams record")
             }
@@ -514,6 +537,9 @@ impl PartialEq for ParseError {
             (ParseError::Truncated, ParseError::Truncated) => true,
             (ParseError::BadLevel(a), ParseError::BadLevel(b)) => a == b,
             (ParseError::BadWalls(a), ParseError::BadWalls(b)) => a == b,
+            (ParseError::BadWorldSize(aw, ah), ParseError::BadWorldSize(bw, bh)) => {
+                aw == bw && ah == bh
+            }
             (ParseError::DuplicateContactParams, ParseError::DuplicateContactParams) => true,
             (ParseError::LateContactParams, ParseError::LateContactParams) => true,
             (ParseError::BadContactParams, ParseError::BadContactParams) => true,
@@ -546,6 +572,9 @@ impl<R: Read> StreamReader<R> {
         }
         let world_w = u32::from_le_bytes(buf[8..12].try_into().unwrap());
         let world_h = u32::from_le_bytes(buf[12..16].try_into().unwrap());
+        if world_w != WORLD_W || world_h != WORLD_H {
+            return Err(ParseError::BadWorldSize(world_w, world_h));
+        }
         let mut body_count = None;
         if version == FORMAT_VERSION_GRAVITY {
             let mut bc = [0u8; 4];
@@ -1619,5 +1648,68 @@ mod tests {
         let mut r = StreamReader::new(&buf[..]).unwrap();
         assert_eq!(r.next_record().unwrap(), Some(rec));
         assert_eq!(r.next_record().unwrap(), None);
+    }
+
+    #[test]
+    fn writer_rejects_non_spec_world_dimensions_before_serializing() {
+        // OTO-021: section 9 fixes the world at 128 x 128; both
+        // constructors reject any other dimensions before writing any
+        // bytes.
+        let mut buf = Vec::new();
+        let err = match StreamWriter::new(&mut buf, 64, 128) {
+            Ok(_) => panic!("writer must reject 64x128"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "invalid world dimensions 64x128, the spec fixes 128x128"
+        );
+        let err = match StreamWriter::new_gravity(&mut buf, 128, 64, 8) {
+            Ok(_) => panic!("gravity writer must reject 128x64"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "invalid world dimensions 128x64, the spec fixes 128x128"
+        );
+        assert!(buf.is_empty(), "no bytes written on rejection");
+    }
+
+    // Handcraft a header with arbitrary dimensions (the writer now
+    // rejects them): magic, u32 version, u32 world_w, u32 world_h,
+    // and for version 2 a u32 body_count.
+    fn crafted_header(version: u32, world_w: u32, world_h: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&version.to_le_bytes());
+        buf.extend_from_slice(&world_w.to_le_bytes());
+        buf.extend_from_slice(&world_h.to_le_bytes());
+        if version == FORMAT_VERSION_GRAVITY {
+            buf.extend_from_slice(&8u32.to_le_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn reader_rejects_non_spec_world_dimensions() {
+        // OTO-021: either dimension off the pinned 128 x 128 makes the
+        // header invalid in both format versions.
+        for (version, w, h) in [
+            (FORMAT_VERSION, 64, 128),
+            (FORMAT_VERSION, 128, 127),
+            (FORMAT_VERSION, 256, 256),
+            (FORMAT_VERSION_GRAVITY, 64, 128),
+            (FORMAT_VERSION_GRAVITY, 128, 127),
+            (FORMAT_VERSION_GRAVITY, 256, 256),
+        ] {
+            let buf = crafted_header(version, w, h);
+            assert_eq!(
+                StreamReader::new(&buf[..]).unwrap_err(),
+                ParseError::BadWorldSize(w, h),
+                "version {version} must reject {w}x{h}"
+            );
+        }
     }
 }

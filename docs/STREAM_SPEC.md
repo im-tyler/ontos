@@ -109,6 +109,8 @@ Header (not a record):
 - u32 format version = 1
 - u32 world_w = 128
 - u32 world_h = 128
+  (version 2 inherits these fields; a header with any other world
+  dimensions is invalid and verifiers must reject it)
 
 Records, each a u8 tag followed by its payload:
 - tag 1 TickHeader: u64 tick
