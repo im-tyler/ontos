@@ -1340,16 +1340,18 @@ impl GravityWorld {
         // once in pinned (i, j) id order and dispatches on membership —
         // a fine body resolving against an ephemeris-coarse contactant
         // is reachable whichever member carries the smaller id. Only
-        // (fine, fine), (fine, coarse), and — with the section 24
-        // record — (coarse, fine) pairs proceed; collapsed members
-        // never contact individually (their region contacts as a
-        // monopole), coarse-coarse pairs have no movable member, and
-        // without the record non-fine bodies never contact (section 21).
+        // (fine, fine) pairs proceed on contact mode alone; either
+        // static orientation — (fine, coarse) and (coarse, fine) —
+        // proceeds only with the section 24 record (without it
+        // non-fine bodies never contact, section 21). Collapsed
+        // members never contact individually (their region contacts
+        // as a monopole) and coarse-coarse pairs have no movable
+        // member.
         for i in 0..n {
             for j in (i + 1)..n {
                 match (kind[i], kind[j]) {
-                    (0, 0) | (0, 1) => {}
-                    (1, 0) if extended => {}
+                    (0, 0) => {}
+                    (0, 1) | (1, 0) if extended => {}
                     _ => continue,
                 }
                 // f is the fine member; so is the other member's state
@@ -2728,6 +2730,80 @@ mod tests {
                     assert!(
                         (c.vn_after - expect).abs() < 1e-12,
                         "static bounce closes on -e*vn"
+                    );
+                }
+            }
+            w.last_contacts.clear();
+        }
+        assert!(
+            statics >= 4,
+            "expected fine x coarse static contacts, got {statics}"
+        );
+    }
+
+    #[test]
+    fn bare_contacts_skip_fine_coarse_static_pairs() {
+        // OTO-019: the coarsehit IC with bare --contacts (no tag 12
+        // record) and an early demotion follows section 21 — a pair
+        // with a non-fine member is skipped in either id orientation,
+        // so the run is bit-identical to one with contacts off.
+        let run = |contacts: bool| {
+            let mut w = GravityWorld::corpus_world("coarsehit", 11, 8);
+            w.contacts = contacts;
+            w.schedule(1, 3, Action::Demote);
+            let mut hashes = Vec::new();
+            let mut records = 0usize;
+            for _ in 0..500 {
+                w.step();
+                records += w.last_contacts.len();
+                w.last_contacts.clear();
+                hashes.push(w.world_hash());
+            }
+            (w, hashes, records)
+        };
+        let (ctl_w, ctl_hashes, ctl_records) = run(false);
+        let (bare_w, bare_hashes, bare_records) = run(true);
+        assert_eq!(ctl_records, 0, "contacts off emits nothing");
+        assert_eq!(bare_records, 0, "bare contacts emits no record in this IC");
+        assert_eq!(
+            bare_hashes, ctl_hashes,
+            "bare contacts is bit-identical to contacts off"
+        );
+        for (a, b) in ctl_w.bodies.iter().zip(bare_w.bodies.iter()) {
+            assert_eq!(a.x.to_bits(), b.x.to_bits());
+            assert_eq!(a.y.to_bits(), b.y.to_bits());
+            assert_eq!(a.vx.to_bits(), b.vx.to_bits());
+            assert_eq!(a.vy.to_bits(), b.vy.to_bits());
+        }
+        assert!(
+            bare_w.touching.is_empty(),
+            "no static pair enters the touching set"
+        );
+    }
+
+    #[test]
+    fn zero_restitution_record_admits_static_contacts() {
+        // OTO-019: record presence, not value — an explicit
+        // `--restitution 0` emits tag 12 with zeros and the fine x
+        // coarse static pairs fire, distinguishing record absence
+        // from zero-valued parameters.
+        let mut w = GravityWorld::corpus_world("coarsehit", 11, 8);
+        w.contacts = true;
+        w.contact_params = true;
+        w.restitution = 0.0;
+        w.schedule(1, 3, Action::Demote);
+        let mut statics = 0usize;
+        for _ in 0..500 {
+            w.step();
+            for c in &w.last_contacts {
+                assert!(c.jn > 0.0);
+                let j = c.b as usize;
+                if j < w.bodies.len() && w.coarse[j].is_some() {
+                    statics += 1;
+                    assert!(
+                        c.vn_after.abs() < 1e-12,
+                        "e = 0 closure, vn_after {}",
+                        c.vn_after
                     );
                 }
             }
