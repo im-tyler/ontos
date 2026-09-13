@@ -880,8 +880,9 @@ no solver tolerance. The parameters travel in the stream.
        n = (0, -1), contact point (x_i, (y_i + 0.0) * 0.5)
   y=128: overlap iff y_i + r_i > 128.0, approaching iff vy_i > 0.0,
        n = (0, 1), contact point (x_i, (y_i + 128.0) * 0.5)
-  vn = vx_i * nx + vy_i * ny (v_c = 0); the static one-sided formulas
-  apply with the pinned tangent rule.
+  vn = (0.0 - vx_i) * nx + (0.0 - vy_i) * ny — the preceding static
+  formulas with v_c = (0, 0); the one-sided resolution and pinned
+  tangent rule apply unchanged.
 
 - Records: Contact records are emitted for every phase in generation
   order — body pairs lexicographic (including fine x coarse static
